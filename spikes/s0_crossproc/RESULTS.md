@@ -65,9 +65,13 @@ convenience rather than a correctness mechanism.**
 PreToolUse hook "can only allow or deny". That is wrong for this build: returning
 
 ```python
-{"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                        "permissionDecision": "defer",
-                        "permissionDecisionReason": "..."}}
+{
+    "hookSpecificOutput": {
+        "hookEventName": "PreToolUse",
+        "permissionDecision": "defer",
+        "permissionDecisionReason": "...",
+    }
+}
 ```
 
 made the CLI exit with `stop_reason="tool_deferred"` and a populated `deferred_tool_use`. The

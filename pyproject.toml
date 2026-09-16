@@ -27,6 +27,10 @@ filterwarnings = ["error::DeprecationWarning:jarvis.*"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# docs/ is prose. ruff format rewrites python blocks inside markdown, which
+# expands the design doc's deliberately compact snippets and buries the diff of
+# an actual design change in reformatting noise.
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

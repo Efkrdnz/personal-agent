@@ -65,12 +65,26 @@ def run_pair(name: str, scenario: str, answerer_args: list[str], timeout: int = 
     out = WORK / f"{name}.driver.json"
     ans = subprocess.Popen(
         [PY, str(HERE / "answerer.py"), "--socket", sock, *answerer_args],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     drv = subprocess.run(
-        [PY, str(HERE / "driver.py"), "--scenario", scenario, "--socket", sock,
-         "--db", db, "--out", str(out)],
-        capture_output=True, text=True, timeout=timeout,
+        [
+            PY,
+            str(HERE / "driver.py"),
+            "--scenario",
+            scenario,
+            "--socket",
+            sock,
+            "--db",
+            db,
+            "--out",
+            str(out),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     a_out, a_err = ans.communicate(timeout=30)
     result = json.loads(out.read_text()) if out.exists() else {}
@@ -104,10 +118,23 @@ def run_defer(gap_seconds: int, timeout: int = 300) -> dict:
 
     env = {**os.environ, "DEFER": "1"}
     p = subprocess.Popen(
-        [PY, str(HERE / "driver.py"), "--scenario", "single", "--socket", sock,
-         "--db", db, "--out", str(out1)],
-        env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        text=True, start_new_session=True,
+        [
+            PY,
+            str(HERE / "driver.py"),
+            "--scenario",
+            "single",
+            "--socket",
+            sock,
+            "--db",
+            db,
+            "--out",
+            str(out1),
+        ],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
     try:
         o, e = p.communicate(timeout=timeout)
@@ -172,9 +199,21 @@ def run_defer(gap_seconds: int, timeout: int = 300) -> dict:
     time.sleep(gap_seconds)
 
     r = subprocess.run(
-        [PY, str(HERE / "driver.py"), "--socket", sock, "--db", db,
-         "--resume", session_id, "--out", str(out2)],
-        capture_output=True, text=True, timeout=timeout,
+        [
+            PY,
+            str(HERE / "driver.py"),
+            "--socket",
+            sock,
+            "--db",
+            db,
+            "--resume",
+            session_id,
+            "--out",
+            str(out2),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
     )
     phases["p4_rc"] = r.returncode
     phases["p4_result"] = json.loads(out2.read_text()) if out2.exists() else {}
@@ -204,9 +243,7 @@ def main() -> int:
         results["multi"] = run_pair("multi", "multi", ["--pick", "one and three"])
     if "freetext" in want:
         print("→ scenario 3: 'none of these', free text", file=sys.stderr)
-        results["freetext"] = run_pair(
-            "freetext", "freetext", ["--free", "Postgres, actually"]
-        )
+        results["freetext"] = run_pair("freetext", "freetext", ["--free", "Postgres, actually"])
     if "defer" in want:
         print(f"→ scenario 4: defer, kill, {args.gap}s gap, resume", file=sys.stderr)
         results["defer"] = run_defer(args.gap)

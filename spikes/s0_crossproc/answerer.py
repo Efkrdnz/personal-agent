@@ -32,9 +32,24 @@ import time
 # Ordinal words, English and Turkish — parsed locally, before any model is
 # consulted. "one and three" / "bir ve üç" must never need an API call.
 ORDINALS = {
-    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
-    "bir": 1, "iki": 2, "üç": 3, "uc": 3, "dört": 4, "dort": 4, "beş": 5, "bes": 5,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "bir": 1,
+    "iki": 2,
+    "üç": 3,
+    "uc": 3,
+    "dört": 4,
+    "dort": 4,
+    "beş": 5,
+    "bes": 5,
 }
 
 

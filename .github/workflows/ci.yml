@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # check_gitignore.py shells out to `git check-ignore`, which needs the
+          # real repo, not a flattened export.
+          fetch-depth: 1
+
+      - uses: astral-sh/setup-uv@v5
+      - run: uv python install 3.11
+
+      - name: Install
+        run: uv venv && uv pip install -e '.[dev]'
+
+      # Runs first and on its own: if a secret pattern has gone inert, that is
+      # the most urgent thing in the log, not something to find under a lint dump.
+      - name: Secret patterns actually fire
+        run: uv run python tools/check_gitignore.py
+
+      - name: No CC BY-NC reference code in the tree
+        run: uv run python tools/check_no_reference_code.py
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format
+        run: uv run ruff format --check .
+
+      - name: Tests
+        run: uv run pytest -q
+
+      # The spine must import on a bare interpreter. Every process opens the
+      # database, including ones that will never install the voice or CC deps.
+      - name: Spine imports with no third-party packages
+        run: uv run python -S -c "import jarvis.db, jarvis.ids, jarvis.clock; print('ok')"

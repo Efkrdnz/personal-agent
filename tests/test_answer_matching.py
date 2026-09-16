@@ -26,8 +26,10 @@ SINGLE = {
 MULTI = {
     "question": "Which features?",
     "options": [
-        {"label": "Due dates"}, {"label": "Tags"},
-        {"label": "Priorities"}, {"label": "Recurring"},
+        {"label": "Due dates"},
+        {"label": "Tags"},
+        {"label": "Priorities"},
+        {"label": "Recurring"},
     ],
     "multiSelect": True,
 }
@@ -42,18 +44,18 @@ MULTI = {
         ("one and three", 4, [1, 3]),
         ("1,3", 4, [1, 3]),
         ("1, 3", 4, [1, 3]),
-        ("three and one", 4, [3, 1]),          # order preserved as spoken
-        ("two.", 3, [2]),                       # trailing punctuation from ASR
-        ("ONE", 3, [1]),                        # casing from ASR
-        ("bir", 3, [1]),                        # Turkish ordinals, parsed locally
+        ("three and one", 4, [3, 1]),  # order preserved as spoken
+        ("two.", 3, [2]),  # trailing punctuation from ASR
+        ("ONE", 3, [1]),  # casing from ASR
+        ("bir", 3, [1]),  # Turkish ordinals, parsed locally
         ("üç", 3, [3]),
-        ("uc", 3, [3]),                         # ASR drops the diacritic
+        ("uc", 3, [3]),  # ASR drops the diacritic
         ("bir ve üç", 4, [1, 3]),
-        ("1 and 1", 3, [1]),                    # duplicates collapse
+        ("1 and 1", 3, [1]),  # duplicates collapse
         ("", 3, []),
-        ("Postgres, actually", 3, []),          # free text yields no picks
-        ("9", 3, []),                           # out of range is not a pick
-        ("0", 3, []),                           # 1-based: 0 is not an option
+        ("Postgres, actually", 3, []),  # free text yields no picks
+        ("9", 3, []),  # out of range is not a pick
+        ("0", 3, []),  # 1-based: 0 is not an option
     ],
 )
 def test_parse_picks(said: str, n: int, expected: list[int]) -> None:
