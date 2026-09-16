@@ -306,6 +306,18 @@ def set_briefing_cursor(con: sqlite3.Connection, ts: str | None = None) -> str:
     Deliberately not done by :func:`project_status`: a briefing that was composed
     and then not delivered — the channel dropped, the room was empty — must be
     said again, and a read that advanced the cursor would lose it silently.
+
+    THE CURSOR IS INCLUSIVE, and that is a choice rather than an oversight.
+    :func:`jarvis.jobs.since` matches ``updated_at >= cursor``, and ``now()`` is
+    millisecond-granular, so a job that finishes in the same millisecond the
+    cursor is written gets mentioned again in the next briefing. Measured: the
+    collision happens on roughly 80% of back-to-back writes on a fast disk.
+
+    Repeating beats dropping. Hearing "the scraper build failed" twice is mildly
+    annoying; the exclusive version would mean never hearing it at all, and the
+    whole point of the briefing is that nothing important goes unsaid. A
+    monotonic sequence rather than a timestamp would give both, and is the right
+    fix if this ever becomes irritating in practice.
     """
     value = ts or now()
     con.execute(

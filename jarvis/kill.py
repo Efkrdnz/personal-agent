@@ -299,7 +299,7 @@ def doomed_jobs(con: sqlite3.Connection, *, epoch: int | None = None) -> list[Jo
     rows = con.execute(
         f"""SELECT id FROM jobs
              WHERE kill_epoch < ? AND state NOT IN ({",".join("?" * len(TERMINAL_STATES))})
-             ORDER BY updated_at""",
+             ORDER BY updated_at, rowid""",
         (current, *sorted(TERMINAL_STATES)),
     ).fetchall()
     jobs = (get(con, str(r["id"])) for r in rows)
@@ -813,7 +813,7 @@ def reap_all(
     """
     rows = con.execute(
         f"""SELECT id FROM jobs WHERE state IN ({",".join("?" * len(ACTIVE_JOB_STATES))})
-             ORDER BY created_at""",
+             ORDER BY created_at, rowid""",
         ACTIVE_JOB_STATES,
     ).fetchall()
     outcomes: dict[str, TerminateOutcome] = {}

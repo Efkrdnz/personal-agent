@@ -888,7 +888,7 @@ def list_by_state(con: sqlite3.Connection, states: str | Iterable[str]) -> list[
         raise ValueError(f"unknown job state(s): {', '.join(unknown)}")
     marks = ",".join("?" for _ in wanted)
     rows = con.execute(
-        f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY updated_at, id", tuple(wanted)
+        f"SELECT * FROM jobs WHERE state IN ({marks}) ORDER BY updated_at, rowid", tuple(wanted)
     ).fetchall()
     return [to_job(r) for r in rows]
 
@@ -920,7 +920,7 @@ def blocked_longer_than(con: sqlite3.Connection, seconds: int) -> list[Job]:
 def since(con: sqlite3.Connection, ts: str) -> list[Job]:
     """Jobs whose state changed at or after ``ts``."""
     rows = con.execute(
-        "SELECT * FROM jobs WHERE updated_at >= ? ORDER BY updated_at, id", (ts,)
+        "SELECT * FROM jobs WHERE updated_at >= ? ORDER BY updated_at, rowid", (ts,)
     ).fetchall()
     return [to_job(r) for r in rows]
 

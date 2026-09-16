@@ -25,6 +25,7 @@ from jarvis import jobs, reconcile
 from jarvis import requests as rq
 from jarvis.db import connect, migrate
 from jarvis.ids import now
+from jarvis.jobs import shift_ts
 
 # ───────────────────────────── fixtures ─────────────────────────────
 
@@ -519,9 +520,38 @@ def test_reading_the_briefing_does_not_consume_it(
 
     # Only after it was actually spoken does the cursor move — and the move is
     # visible to every other process, because it is a row.
-    reconcile.set_briefing_cursor(con)
+    #
+    # The cursor is passed explicitly rather than defaulted to now(). The default
+    # would collide with this job's updated_at about 80% of the time (measured),
+    # because now() is millisecond-granular and the cursor is inclusive — which
+    # made this assertion a coin flip rather than a statement about the cursor.
+    # The collision behaviour itself is intended and has its own test below.
+    reconcile.set_briefing_cursor(con, ts=shift_ts(jobs.get(con, job.id).updated_at, 0.001))
     assert reconcile.briefing_cursor(other) is not None
     assert reconcile.project_status(other).finished == ()
+
+
+def test_a_job_finishing_on_the_cursor_boundary_is_repeated_not_dropped(
+    con: sqlite3.Connection,
+) -> None:
+    """The cursor is inclusive on purpose. Repeating beats dropping.
+
+    ``jobs.since`` matches ``updated_at >= cursor``, so a job that finishes in
+    the same millisecond the cursor is written is mentioned again tomorrow.
+    Hearing "the scraper build failed" twice is mildly annoying; the exclusive
+    version would mean never hearing it at all.
+    """
+    job = jobs.create_job(
+        con, kind="claude_code", title="the scraper", created_by="desk", state="running"
+    )
+    jobs.set_state(con, job.id, "failed")
+    boundary = jobs.get(con, job.id).updated_at
+
+    reconcile.set_briefing_cursor(con, ts=boundary)
+    again = reconcile.project_status(con)
+    assert [n.job_id for n in again.failed] == [job.id], (
+        "a job on the cursor boundary must be repeated, never silently dropped"
+    )
 
 
 def test_the_default_window_is_the_briefing_cursor(con: sqlite3.Connection) -> None:

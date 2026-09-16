@@ -1086,11 +1086,11 @@ def test_the_ledger_survives_a_restart_and_reads_back_in_order(db_path: Path) ->
     ids = [first.id, second.id]
     writer.close()
 
-    # Both order-bys tie-break on the random id, so two rows sharing a
-    # millisecond would make the assertions below a coin flip rather than a
-    # statement about ordering. Fail here, legibly, rather than 26% of the time
-    # somewhere else on a faster disk.
-    assert first.ts < second.ts, "same-millisecond writes make this test meaningless, not wrong"
+    # No same-millisecond guard here any more, deliberately. Both order-bys used
+    # to tie-break on the random id, which made this a coin flip about 1 run in 3
+    # — and, far worse, made the activity log report same-millisecond effects in
+    # arbitrary order. They now tie-break on rowid, which is insertion order on
+    # an append-only table, so this holds whether or not the clock ticked.
 
     reader = connect(db_path)
     assert [e.id for e in fx.effects_since(reader, before)] == ids
@@ -1107,3 +1107,37 @@ def test_an_effect_with_no_summary_cannot_be_recorded(con: sqlite3.Connection) -
         fx.record_effect(con, kind="fs.edit", summary="   ", reversibility="reversible")
     with pytest.raises(ValueError):
         fx.record_effect(con, kind="fs.edit", summary="ok", reversibility="maybe")  # type: ignore[arg-type]
+
+
+def test_effects_written_in_the_same_millisecond_read_back_in_insertion_order(
+    db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The activity log's ordering guarantee, pinned.
+
+    ``ids.now()`` is millisecond-granular, and on a fast disk several effects
+    land inside one tick routinely. Ordering by timestamp alone leaves those
+    rows tied, and tie-breaking on a random id made "what did you do today"
+    report them in arbitrary order — so Jarvis could say it sent the screenshot
+    before it created the repo when it was the other way round. In a feature
+    whose whole point is honesty, that is a defect rather than a cosmetic issue.
+    """
+    con = connect(db_path)
+    # Freeze the clock rather than hoping for a collision: on a slow disk the
+    # natural version of this test would pass for the wrong reason.
+    monkeypatch.setattr(fx, "now", lambda: "2026-09-16T12:00:00.000Z")
+    ids = [
+        fx.record_effect(
+            con,
+            kind="fs.edit",
+            summary=f"edit number {i}",
+            reversibility="reversible",
+            job_id=JOB,
+            actor="test",
+        ).id
+        for i in range(12)
+    ]
+    assert len({e.ts for e in fx.recent_effects(con, job_id=JOB)}) == 1, "setup: one tick"
+
+    newest_first = [e.id for e in fx.recent_effects(con, job_id=JOB)]
+    assert newest_first == list(reversed(ids))
+    assert [e.id for e in fx.recent_effects(con, job_id=JOB, limit=3)] == list(reversed(ids))[:3]

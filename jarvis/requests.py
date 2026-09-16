@@ -595,7 +595,10 @@ def open_requests(con: sqlite3.Connection, job_id: str | None = None) -> list[Re
     if job_id is not None:
         sql += " AND job_id=?"
         args = (job_id,)
-    sql += " ORDER BY created_at"
+    # rowid, not id: ids are random, so two rows written in the same
+    # millisecond would come back in arbitrary order. These tables are
+    # append-only, so rowid is insertion order.
+    sql += " ORDER BY created_at, rowid"
     return [_to_request(r) for r in con.execute(sql, args).fetchall()]
 
 

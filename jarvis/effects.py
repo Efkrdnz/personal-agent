@@ -698,7 +698,10 @@ def recent_effects(
     if state is not None:
         sql += " AND state=?"
         args.append(state)
-    sql += " ORDER BY ts DESC, id DESC LIMIT ?"
+    # rowid, not id: ids are random, so two rows written in the same
+    # millisecond would come back in arbitrary order. These tables are
+    # append-only, so rowid is insertion order.
+    sql += " ORDER BY ts DESC, rowid DESC LIMIT ?"
     args.append(limit)
     return [_to_effect(r) for r in con.execute(sql, args)]
 
@@ -707,7 +710,7 @@ def effects_since(con: sqlite3.Connection, ts: str) -> list[Effect]:
     """Oldest first, for narration and the morning briefing."""
     return [
         _to_effect(r)
-        for r in con.execute("SELECT * FROM effects WHERE ts > ? ORDER BY ts, id", (ts,))
+        for r in con.execute("SELECT * FROM effects WHERE ts > ? ORDER BY ts, rowid", (ts,))
     ]
 
 
