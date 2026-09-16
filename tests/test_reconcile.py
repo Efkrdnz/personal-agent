@@ -524,6 +524,26 @@ def test_reading_the_briefing_does_not_consume_it(
     assert reconcile.project_status(other).finished == ()
 
 
+def test_a_job_that_finished_in_the_cursors_own_millisecond_is_not_said_twice(
+    con: sqlite3.Connection,
+) -> None:
+    """The cursor is a millisecond bucket, not an instant.
+
+    jarvis.ids.now writes milliseconds, so a job that finishes and a briefing
+    that advances its cursor microseconds apart land on the identical string.
+    The briefing already read this one out; tomorrow's must not do it again.
+    Pinned rather than raced, because as a coincidence it only fails some runs.
+    """
+    job = jobs.create_job(
+        con, kind="claude_code", title="the todo app build", created_by="desk", state="running"
+    )
+    jobs.set_state(con, job.id, "done")
+    mark = reconcile.set_briefing_cursor(con)
+    con.execute("UPDATE jobs SET updated_at=? WHERE id=?", (mark, job.id))
+
+    assert reconcile.project_status(con).finished == ()
+
+
 def test_the_default_window_is_the_briefing_cursor(con: sqlite3.Connection) -> None:
     old = jobs.create_job(
         con, kind="claude_code", title="yesterday's build", created_by="desk", state="running"

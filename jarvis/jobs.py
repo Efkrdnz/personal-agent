@@ -918,9 +918,24 @@ def blocked_longer_than(con: sqlite3.Connection, seconds: int) -> list[Job]:
 
 
 def since(con: sqlite3.Connection, ts: str) -> list[Job]:
-    """Jobs whose state changed at or after ``ts``."""
+    """Jobs whose state changed strictly after ``ts``.
+
+    EXCLUSIVE, because ``ts`` is a cursor and a cursor means "everything up to
+    here has already been dealt with". :func:`jarvis.ids.now` writes
+    MILLISECONDS, so ``ts`` is not an instant — it is a 1ms bucket. A job that
+    finishes and a briefing cursor that advances microseconds apart produce the
+    identical string, and under ``>=`` the job the briefing just read out is
+    still ``>=`` the cursor it just wrote: it gets said a second time tomorrow.
+    The boundary bucket is the one the reader has already been told about, so it
+    is the one to drop.
+
+    Same shape as every other cursor read in this system —
+    :func:`jarvis.effects.effects_since` (``ts > ?``) and
+    :func:`jarvis.bus.read_since` (``seq > ?``) — so no reader re-handles the row
+    it committed on.
+    """
     rows = con.execute(
-        "SELECT * FROM jobs WHERE updated_at >= ? ORDER BY updated_at, id", (ts,)
+        "SELECT * FROM jobs WHERE updated_at > ? ORDER BY updated_at, id", (ts,)
     ).fetchall()
     return [to_job(r) for r in rows]
 
