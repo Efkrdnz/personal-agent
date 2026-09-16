@@ -39,8 +39,14 @@ from typing import Any
 
 from jarvis import jobs, kill
 from jarvis import requests as rq
+from jarvis.answers import (
+    AnswerShapeError,
+    MalformedQuestions,
+    questions_of,
+    validate_answers,
+)
 from jarvis.bus import publish
-from jarvis.cc import narrate, policy
+from jarvis.cc import policy
 from jarvis.cc.gate import ASK_USER_QUESTION, EXIT_PLAN_MODE, ensure_request
 from jarvis.cc.hooks import DeferLedger
 from jarvis.cc.sdk import PermissionResult, PermissionResultAllow, PermissionResultDeny
@@ -151,8 +157,8 @@ class PermissionHost:
         self, input_data: dict[str, Any], tuid: str | None
     ) -> PermissionResult:
         try:
-            questions = narrate.questions_of(input_data)
-        except narrate.MalformedQuestions as e:
+            questions = questions_of(input_data)
+        except MalformedQuestions as e:
             return self._deny("AskUserQuestion", tuid, f"That question payload is unusable: {e}")
 
         if tuid:
@@ -207,10 +213,10 @@ class PermissionHost:
                 ASK_USER_QUESTION, tuid, "No per-question answer was recorded for that question."
             )
         try:
-            narrate.validate_answers(questions, answers)
-        except narrate.AnswerShapeError as e:
+            validate_answers(questions, answers)
+        except AnswerShapeError as e:
             # The answer was written by another process, hours ago, by a channel
-            # that does not import narrate. This is the only place it can be
+            # that does not import jarvis.answers. This is the only place it can be
             # checked against the frozen options array before it reaches Claude.
             return self._deny(
                 ASK_USER_QUESTION, tuid, f"That answer does not fit the question: {e}"

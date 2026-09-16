@@ -2,7 +2,7 @@
 
 The rendering tests exist for one reason: the desk SPEAKS the same frozen array
 this module PRINTS, and the answer key is the index in both. So the numbering is
-compared against ``jarvis.cc.narrate.script`` byte for byte rather than merely
+compared against ``jarvis.voice.script.script`` byte for byte rather than merely
 looking right.
 
 The callback tests exist for a different one. Telegram caps ``callback_data`` at
@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import pytest
 
-from jarvis.cc import narrate
+from jarvis.answers import presentation
 from jarvis.requests import make_presentation
 from jarvis.telegram import render
+from jarvis.voice.script import script
 
 QUESTIONS = [
     {
@@ -47,8 +48,8 @@ def _pres(**kwargs: object) -> dict:
 
 
 def test_the_printed_options_match_what_the_desk_says_out_loud() -> None:
-    spoken = [line.text for line in narrate.script(QUESTIONS) if line.kind == "option"]
-    printed = render.numbered_body(narrate.presentation(QUESTIONS)).splitlines()
+    spoken = [line.text for line in script(QUESTIONS) if line.kind == "option"]
+    printed = render.numbered_body(presentation(QUESTIONS)).splitlines()
     for text in spoken:
         assert text in printed, f"{text!r} is spoken but not printed"
 

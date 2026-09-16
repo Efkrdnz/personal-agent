@@ -20,8 +20,8 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
+from jarvis import answers
 from jarvis.bus import publish
-from jarvis.cc import narrate
 from jarvis.ids import dedupe_key
 from jarvis.requests import (
     Presentation,
@@ -101,8 +101,8 @@ def _shape(tool_name: str, input_data: dict[str, Any]) -> tuple[ReqKind, str, Pr
     if tool_name == ASK_USER_QUESTION:
         return (
             "plan_question",
-            narrate.short_label(input_data),
-            narrate.presentation(input_data),
+            answers.short_label(input_data),
+            answers.presentation(input_data),
         )
     if tool_name == EXIT_PLAN_MODE:
         plan = input_data.get("plan")

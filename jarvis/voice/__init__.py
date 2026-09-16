@@ -19,6 +19,10 @@ Layout:
     Content-addressed PCM on disk, so a repeated label is a file read.
 ``verbatim``
     The engine ladder, the earcon, and :class:`NoVerbatimEngine` — the refusal.
+``script``
+    An ``AskUserQuestion`` payload -> the ordered lines to speak, each already
+    tagged with the tier it must be said at. The numbering itself belongs to
+    :mod:`jarvis.answers` in the spine; only the SAYING of it is a voice concern.
 ``chunk``
     One clip per option, plus a streaming sentence splitter for narration.
 
@@ -64,6 +68,7 @@ from jarvis.voice.router import (
     publish_said,
     track_for,
 )
+from jarvis.voice.script import Line, LineKind, script
 from jarvis.voice.verbatim import NoVerbatimEngine, VerbatimSpeaker, earcon_pcm
 
 __all__ = [
@@ -78,6 +83,8 @@ __all__ = [
     "Fidelity",
     "FidelityViolation",
     "KokoroEngine",
+    "Line",
+    "LineKind",
     "NoReader",
     "NoVerbatimEngine",
     "OutputRouter",
@@ -99,6 +106,7 @@ __all__ = [
     "presynthesise",
     "publish_said",
     "readback_clips",
+    "script",
     "sentences",
     "track_for",
 ]

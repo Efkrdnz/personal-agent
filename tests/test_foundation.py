@@ -195,7 +195,7 @@ def test_spine_imports_with_no_third_party_packages() -> None:
             "-S",
             "-c",
             f"import sys; sys.path.insert(0, {str(src)!r}); "
-            "import jarvis.db, jarvis.ids, jarvis.clock; print('ok')",
+            "import jarvis.answers, jarvis.db, jarvis.ids, jarvis.clock; print('ok')",
         ],
         capture_output=True,
         text=True,

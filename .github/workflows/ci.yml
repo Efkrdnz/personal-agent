@@ -34,6 +34,12 @@ jobs:
       - name: No CC BY-NC reference code in the tree
         run: uv run python tools/check_no_reference_code.py
 
+      # The seams in CLAUDE.md are claims about DIRECTION, and a backwards import
+      # breaks nothing at runtime: it just makes the phone stage a rewrite instead
+      # of a re-wiring, silently, one convenience at a time.
+      - name: Layers only depend inwards
+        run: uv run python tools/check_layers.py
+
       - name: Lint
         run: uv run ruff check .
 
@@ -46,4 +52,4 @@ jobs:
       # The spine must import on a bare interpreter. Every process opens the
       # database, including ones that will never install the voice or CC deps.
       - name: Spine imports with no third-party packages
-        run: uv run python -S -c "import jarvis.db, jarvis.ids, jarvis.clock; print('ok')"
+        run: uv run python -S -c "import jarvis.answers, jarvis.db, jarvis.ids, jarvis.clock; print('ok')"

@@ -108,7 +108,7 @@ GATE_MIN_RECALL = 0.999
 GATE_MIN_LABELS = 1000
 
 #: Spoken ordinals the reader may legitimately produce. The written form ("2.")
-#: is what jarvis.cc.narrate emits; the word forms are what an ASR returns when
+#: is what jarvis.voice.script emits; the word forms are what an ASR returns when
 #: a voice says it. Turkish is here because the reader speaks Turkish labels and
 #: a probe that only knows English would score every Turkish round at zero.
 ORDINAL_WORDS: dict[str, dict[int, tuple[str, ...]]] = {
@@ -166,7 +166,7 @@ def expected_script(labels: Sequence[str]) -> str:
 
     Used as the denominator for insertions when the caller does not supply the
     real script. It is the ordinal-plus-label form on purpose: that adjacency is
-    what jarvis.cc.narrate emits and what this scorer requires.
+    what jarvis.voice.script emits and what this scorer requires.
     """
     return " ".join(f"{i}. {label}" for i, label in enumerate(labels, start=1))
 

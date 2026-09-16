@@ -20,7 +20,8 @@ from typing import Any
 import pytest
 
 from jarvis import requests as rq
-from jarvis.cc import gate, narrate
+from jarvis.answers import validate_answers
+from jarvis.cc import gate
 from jarvis.db import connect, migrate
 from jarvis.ids import now
 from jarvis.telegram import render
@@ -211,7 +212,7 @@ def test_one_tap_answers_a_single_select_question(
     }
     assert settled.answer_mode == "button"
     # And the CLI's own validator would accept it.
-    narrate.validate_answers(ONE_QUESTION, settled.answer["answers"])
+    validate_answers(ONE_QUESTION, settled.answer["answers"])
 
 
 def test_the_buttons_go_away_once_the_question_is_settled(

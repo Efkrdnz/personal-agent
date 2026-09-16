@@ -9,7 +9,7 @@ moves, the diff that matters is the one against this file's import list.
 
 *The pure half of the package must import on a machine with no SDK.* The phone
 worker builds a :class:`~jarvis.requests.Presentation` from a stored row and
-needs :mod:`jarvis.cc.narrate`; it has no business installing a CLI. Keeping the
+needs :mod:`jarvis.answers`; it has no business installing a CLI. Keeping the
 import in one module makes "which parts need the extra" a fact you can read
 rather than a thing you discover in production.
 """

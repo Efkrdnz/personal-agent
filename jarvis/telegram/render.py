@@ -194,7 +194,7 @@ def numbered_body(pres: Presentation) -> str:
     """The intro and the options, numbered exactly as the desk reads them aloud.
 
     ``f"{index}. {label}"`` with nothing between the ordinal and the label is the
-    same adjacency ``jarvis.cc.narrate`` speaks, so the two channels' renderings
+    same adjacency ``jarvis.voice.script`` speaks, so the two channels' renderings
     of one question can be compared byte for byte.
     """
     lines: list[str] = []

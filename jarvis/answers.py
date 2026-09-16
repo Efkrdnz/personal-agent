@@ -1,4 +1,4 @@
-"""The numbering script, and the index-to-label resolution. PURE, both ways.
+"""The ``AskUserQuestion`` payload, and the index-to-label resolution. PURE, both ways.
 
 This module is the fidelity guarantee in code. Two properties, and everything
 else here exists to serve them:
@@ -25,6 +25,14 @@ make "three" ambiguous the moment the user answers out of order, and it would pu
 two options numbered 1 in one frozen array. For the overwhelmingly common
 single-question call the two schemes are identical.
 
+THIS LIVES IN THE SPINE BECAUSE EVERY CHANNEL NEEDS IT AND NONE OF THEM IS THE
+DESK. The shape of a question and the shape of its answer are what the Claude
+Code driver, the Telegram bot and the phone leg all have to agree on; putting
+them inside :mod:`jarvis.cc` made two layers depend backwards on a driver they
+never talk to. Speaking a question is a different concern and lives in
+:mod:`jarvis.voice.script`, which reads the numbering from here rather than
+inventing a second one.
+
 Measured facts from spike S1 that this module encodes and must never contradict:
 
   * ``answers`` is keyed by the EXACT question string.
@@ -38,7 +46,7 @@ from __future__ import annotations
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
 from jarvis.requests import Answer, Presentation, make_presentation
 
@@ -46,14 +54,12 @@ __all__ = [
     "FREE_TEXT_PROMPT",
     "MAX_ANSWER_CHARS",
     "AnswerShapeError",
-    "Line",
     "MalformedQuestions",
     "Slot",
     "answer",
     "answers_from_indices",
     "presentation",
     "questions_of",
-    "script",
     "short_label",
     "slots",
     "validate_answers",
@@ -69,12 +75,9 @@ FREE_TEXT_PROMPT = "Or say your own answer."
 #: the channel that built the answer.
 MAX_ANSWER_CHARS = 8192
 
-Fidelity = Literal["exact", "faithful", "free"]
-LineKind = Literal["framing", "question", "option", "free_text"]
-
 
 class MalformedQuestions(ValueError):
-    """An ``AskUserQuestion`` payload this module refuses to narrate.
+    """An ``AskUserQuestion`` payload this module refuses to read.
 
     Its own type because the caller's response differs: a malformed payload is
     denied back to Claude Code, while a bad ANSWER is the channel's bug.
@@ -105,22 +108,6 @@ class Slot:
     label: str
     description: str
     multi: bool
-
-
-@dataclass(frozen=True, slots=True)
-class Line:
-    """One thing to say, with the fidelity tier it must be said at.
-
-    ``text`` is what a renderer shows; ``label`` is the load-bearing substring on
-    an option line, so a verbatim engine can speak the ordinal and the label as
-    one clip while a checker can still compare the label alone byte for byte.
-    """
-
-    kind: LineKind
-    text: str
-    fidelity: Fidelity
-    index: int | None = None
-    label: str | None = None
 
 
 # ───────────────────────────── reading the payload ─────────────────────────────
@@ -187,44 +174,6 @@ def slots(questions: Mapping[str, Any] | Sequence[Any]) -> tuple[Slot, ...]:
                 )
             )
     return tuple(made)
-
-
-# ───────────────────────────── the spoken script ─────────────────────────────
-
-
-def script(questions: Mapping[str, Any] | Sequence[Any]) -> tuple[Line, ...]:
-    """The ordered, numbered items to be spoken. Generated LOCALLY, in payload order.
-
-    One :class:`Line` per clip, because the latency trick is one utterance per
-    option: the whole batch is pre-synthesised while the conversational voice is
-    still saying the framing sentence.
-    """
-    qs = questions_of(questions)
-    sl = slots(qs)
-    total = len(qs)
-    lines: list[Line] = []
-    for qi, q in enumerate(qs, start=1):
-        multi = bool(q.get("multiSelect"))
-        if total > 1:
-            lines.append(Line(kind="framing", text=f"Question {qi} of {total}.", fidelity="free"))
-        lines.append(Line(kind="question", text=str(q["question"]), fidelity="faithful"))
-        if multi:
-            lines.append(Line(kind="framing", text="You can pick more than one.", fidelity="free"))
-        for s in (s for s in sl if s.question_index == qi):
-            # The ordinal immediately precedes the label, with nothing between
-            # them: that adjacency is exactly what tools/fidelity_probe.py scores,
-            # and a comma or an "option" here would fail its own null baseline.
-            lines.append(
-                Line(
-                    kind="option",
-                    text=f"{s.index}. {s.label}",
-                    fidelity="exact",
-                    index=s.index,
-                    label=s.label,
-                )
-            )
-        lines.append(Line(kind="free_text", text=FREE_TEXT_PROMPT, fidelity="free"))
-    return tuple(lines)
 
 
 def presentation(questions: Mapping[str, Any] | Sequence[Any]) -> Presentation:
@@ -331,9 +280,10 @@ def answers_from_indices(
 ) -> dict[str, str | list[str]]:
     """Indices in, the exact ``answers`` dict for ``updated_input`` out.
 
-    ``picks`` are the numbers from :func:`script` — a flat sequence, or a mapping
-    from the exact question text to its numbers. ``free_text`` is the "none of
-    these" case and is the user's OWN WORDS, keyed the same way.
+    ``picks`` are the numbers from :func:`jarvis.voice.script.script` — a flat
+    sequence, or a mapping from the exact question text to its numbers.
+    ``free_text`` is the "none of these" case and is the user's OWN WORDS, keyed
+    the same way.
 
     Every question in the batch must get exactly one of the two. A partially
     answered batch is refused rather than sent, because the CLI would proceed on

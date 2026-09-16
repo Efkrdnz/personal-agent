@@ -367,7 +367,7 @@ async def test_the_first_answer_wins_and_the_host_takes_the_winners(
 async def test_an_invented_label_from_another_channel_never_reaches_claude(
     con: sqlite3.Connection, other: sqlite3.Connection
 ) -> None:
-    # The answer was written hours ago by a process that does not import narrate.
+    # The answer was written hours ago by a process that does not import jarvis.answers.
     # This is the last place it can be checked against the frozen options array.
     host = PermissionHost(con, JOB, sleep=answerer(other, {"answers": {Q: "Postgres"}}))
     bad = await host("AskUserQuestion", MULTI, ctx("toolu_invented"))

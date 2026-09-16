@@ -37,9 +37,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO))
 
-from jarvis import bus, db, jobs, ledger  # noqa: E402
+from jarvis import answers, bus, db, jobs, ledger  # noqa: E402
 from jarvis import requests as rq  # noqa: E402
-from jarvis.cc import narrate  # noqa: E402
+from jarvis.voice.script import script  # noqa: E402
 
 PROMPTS = {
     "single": (
@@ -133,13 +133,13 @@ def main() -> int:
 
     # What the user would have heard, generated locally from the frozen payload.
     raw = json.loads(req.payload) if isinstance(req.payload, str) else req.payload
-    questions = narrate.questions_of(raw)
-    spoken = [ln.text for ln in narrate.script(questions)]
+    questions = answers.questions_of(raw)
+    spoken = [ln.text for ln in script(questions)]
     report["spoken_to_the_user"] = spoken
     print("\n".join(f"  {s}" for s in spoken), file=sys.stderr)
 
     picks = PICKS[args.scenario]
-    answer = narrate.answer(questions, picks)
+    answer = answers.answer(questions, picks)
     report["picked_indices"] = picks
     report["answer_sent"] = answer
 

@@ -17,10 +17,11 @@ where the answer came from, and the buttons go away.
 WHERE THE ANSWER SHAPE COMES FROM, which is the one place this module is allowed
 to know anything about requests: a plan question's answer is keyed by the exact
 question STRING and a multi-question batch numbers its options across the whole
-batch, so building it from indices is :func:`jarvis.cc.narrate.answer`'s job and
-not this module's. That import is pure — ``jarvis.cc.narrate`` is stdlib plus the
-spine, with no SDK and nothing from the desk — and duplicating it here is how the
-two channels would eventually disagree about what "option three" means.
+batch, so building it from indices is :func:`jarvis.answers.answer`'s job and not
+this module's. That import is part of the SPINE — ``jarvis.answers`` is standard
+library plus ``jarvis.requests``, with no SDK, no driver and nothing from the desk
+— and duplicating it here is how the two channels would eventually disagree about
+what "option three" means.
 """
 
 from __future__ import annotations
@@ -30,9 +31,9 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from jarvis import answers
 from jarvis import requests as rq
 from jarvis.bus import publish
-from jarvis.cc import narrate
 from jarvis.telegram import render
 from jarvis.telegram.transport import TelegramError, Transport, TransportError
 
@@ -83,7 +84,7 @@ def needs_confirm(req: rq.Request) -> bool:
     True for multi-select, obviously. Also true for a multi-QUESTION batch: the
     options there are numbered across the whole batch, so one tap answers one
     question and leaves the others unanswered, which
-    :func:`jarvis.cc.narrate.answers_from_indices` correctly refuses. A keyboard
+    :func:`jarvis.answers.answers_from_indices` correctly refuses. A keyboard
     that cannot complete an answer must not look like it can.
     """
     if bool(req.presentation.get("multi")):
@@ -91,8 +92,8 @@ def needs_confirm(req: rq.Request) -> bool:
     if req.kind != "plan_question":
         return False
     try:
-        return len(narrate.questions_of(req.payload)) > 1
-    except narrate.MalformedQuestions:
+        return len(answers.questions_of(req.payload)) > 1
+    except answers.MalformedQuestions:
         return False
 
 
@@ -111,12 +112,12 @@ def build_answer(
     pres = req.presentation
     if req.kind == "plan_question":
         # The batch's own grammar: keyed by question string, list for multiSelect.
-        return narrate.answer(req.payload, list(picks), free_text)
+        return answers.answer(req.payload, list(picks), free_text)
 
     if free_text is not None:
         words = free_text.strip()
         if not words:
-            raise narrate.AnswerShapeError("an empty reply is not an answer")
+            raise answers.AnswerShapeError("an empty reply is not an answer")
         answer: rq.Answer = {"text": words}
         if req.kind in BOOLEAN_KINDS:
             answer["approved"] = False
@@ -127,11 +128,11 @@ def build_answer(
         return answer
 
     if not picks:
-        raise narrate.AnswerShapeError("no option was picked")
+        raise answers.AnswerShapeError("no option was picked")
     labels = rq.labels_for_indices(pres, list(picks))
     multi = bool(pres.get("multi"))
     if not multi and len(labels) != 1:
-        raise narrate.AnswerShapeError(
+        raise answers.AnswerShapeError(
             f"{req.short_label} takes one option; {len(labels)} were picked"
         )
 
@@ -338,7 +339,7 @@ class TelegramChannel:
     ) -> Outcome:
         try:
             answer = build_answer(req, picks=picks, free_text=free_text)
-        except (narrate.AnswerShapeError, rq.OptionIndexError, AmbiguousApproval) as e:
+        except (answers.AnswerShapeError, rq.OptionIndexError, AmbiguousApproval) as e:
             # The question stays PENDING. A shape this channel cannot build is not
             # a decision, and recording one would answer on the user's behalf.
             self._say(transport, f"I could not use that answer: {e}")

@@ -1,5 +1,12 @@
 # Architecture
 
+> **This is the design document, written before the code.** Its file tree and some module names are the
+> design-time sketch and have since diverged as things were built and moved — `jarvis/cc/narrate.py`, for
+> one, no longer exists: its payload and answer logic is now `jarvis/answers.py` in the spine and its
+> spoken-script half is `jarvis/voice/script.py`. For the layout as it actually is, read
+> [`../CLAUDE.md`](../CLAUDE.md) and the tree itself. The *reasoning* here is still current, and is the
+> reason this file is kept rather than rewritten.
+
 **Status:** designed 16 Sep 2026, not yet built. Produced by three independent architectures written from
 deliberately opposed angles, scored by three judging lenses, with dedicated deep-dives on the three hardest
 sub-problems, then synthesised. All three lenses picked the same foundation independently.

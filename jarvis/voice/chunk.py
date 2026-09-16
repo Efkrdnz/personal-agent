@@ -14,12 +14,12 @@ gathers over every clip while the conversational voice is still saying "Claude
 Code has a question about storage", so all TTS latency hides behind Live's own
 utterance. The cache makes the second round free.
 
-THE NUMBERING IS NOT INVENTED HERE. :mod:`jarvis.cc.narrate` owns it, generates
-it locally from the payload order, and hands back lines already tagged with a
-fidelity tier. This module translates those lines into utterances and adds the
-episode's earcon brackets. Two modules, one numbering: there is exactly one
-place in the tree where an option gets a number, which is what lets ``jarvis
-log`` show what the user actually heard.
+THE NUMBERING IS NOT INVENTED HERE. :mod:`jarvis.answers` owns it and generates
+it locally from the payload order; :mod:`jarvis.voice.script` hands back lines
+already tagged with a fidelity tier. This module translates those lines into
+utterances and adds the episode's earcon brackets. Three modules, one numbering:
+there is exactly one place in the tree where an option gets a number, which is
+what lets ``jarvis log`` show what the user actually heard.
 
 The whole read-options episode is PINNED to the reader, including the framing
 and the tail, which are ``free`` text. Switching voices mid-episode is what
@@ -33,8 +33,8 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, NamedTuple
 
-from jarvis.cc import narrate
 from jarvis.voice.router import VERBATIM_TRACK, EarconMark, Fidelity, Utterance
+from jarvis.voice.script import script
 from jarvis.voice.verbatim import VerbatimSpeaker
 
 __all__ = [
@@ -74,12 +74,12 @@ def option_clips(
 ) -> tuple[Utterance, ...]:
     """The spoken form of one ``AskUserQuestion`` batch, one clip per line.
 
-    Fidelity comes straight from :func:`jarvis.cc.narrate.script`: the option
+    Fidelity comes straight from :func:`jarvis.voice.script.script`: the option
     lines are ``exact`` and carry both the ordinal and the label, because the
     ordinal-to-label binding is itself load-bearing — the user answers with a
     number and the number must have been spoken next to the right words.
     """
-    lines = narrate.script(questions)
+    lines = script(questions)
     clips: list[Utterance] = []
     for i, line in enumerate(lines):
         earcon = _bracket(i, len(lines))

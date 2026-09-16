@@ -42,9 +42,8 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from jarvis import presence
+from jarvis import answers, presence
 from jarvis.bus import publish
-from jarvis.cc import narrate
 from jarvis.cc.gate import ASK_USER_QUESTION, ensure_request
 
 __all__ = [
@@ -169,8 +168,8 @@ class Hooks:
             return {"continue_": True}
 
         try:
-            narrate.questions_of(tool_input)
-        except narrate.MalformedQuestions as e:
+            answers.questions_of(tool_input)
+        except answers.MalformedQuestions as e:
             # Not the hook's problem to solve: can_use_tool will deny it with a
             # message Claude can act on. Raising here would kill the whole run
             # over a payload we merely could not narrate.
