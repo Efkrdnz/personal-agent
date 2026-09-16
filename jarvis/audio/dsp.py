@@ -34,10 +34,13 @@ __all__ = [
     "EnergyVad",
     "NoiseSuppressor",
     "NullEchoCanceller",
+    "MIC_PATH_QUALITY",
     "NullNoiseSuppressor",
     "NullResampler",
+    "PLAYBACK_QUALITY",
     "Resampler",
     "ResamplerUnavailable",
+    "SileroVad",
     "SoxrResampler",
     "Vad",
     "VadUnavailable",
@@ -138,9 +141,7 @@ class WebRtcEchoCanceller:
 
     DELAY_RESET_THRESHOLD_MS = 5
 
-    def __init__(
-        self, sample_rate: int, *, channels: int = 1, stream_delay_ms: int = 0
-    ) -> None:
+    def __init__(self, sample_rate: int, *, channels: int = 1, stream_delay_ms: int = 0) -> None:
         try:
             import pywebrtc_audio
         except Exception as exc:  # noqa: BLE001 - any import failure is the same answer
@@ -283,6 +284,8 @@ class Resampler(Protocol):
 
 
 class NullResampler:
+    quality = "none"
+
     def __init__(self, rate: int) -> None:
         self.in_rate = rate
         self.out_rate = rate
@@ -291,10 +294,35 @@ class NullResampler:
         return pcm
 
 
+# MEASURED ON THIS MACHINE (soxr 1.1.0, 48000 -> 16000, 960-sample blocks, 50
+# blocks): the quality setting is a GROUP-DELAY trade, not just a CPU one, and
+# the architecture's latency budget accounts for soxr's CPU cost (0.02 ms) but
+# not for its delay.
+#
+#     QQ   0 samples     LQ  100 (6.3 ms)    MQ  240 (15 ms)
+#     HQ 341 (21 ms)     VHQ 600 (37 ms)
+#
+# 21 ms of HQ delay is 14% of the ~150 ms budget to the duck, spent on a filter
+# whose only job on this path is to reject above 8 kHz for a VAD, a
+# closed-vocabulary spotter and a 16 kHz uplink. LQ also emits near-uniform
+# chunks, where HQ alternates 0 / 490 and makes detector framing lumpy. So the
+# mic path defaults to LQ and the default is stated rather than inherited.
+MIC_PATH_QUALITY = "LQ"
+
+# The PLAYBACK path is a different trade and must not inherit the mic's. LQ was
+# chosen above because its only job there is to reject above 8 kHz for a VAD, a
+# closed-vocabulary spotter and a 16 kHz uplink, and because 21 ms of HQ group
+# delay is 14% of the budget to the duck. Neither argument survives on the desk's
+# 24k -> 48k playback leg: this audio is what the user actually hears and what
+# the AEC references, its delay sits inside the track queue rather than on the
+# barge-in path, and upsampling 24 -> 48 is a handful of microseconds.
+PLAYBACK_QUALITY = "HQ"
+
+
 class SoxrResampler:
     """soxr, imported lazily so a numpy-only box still imports this module."""
 
-    def __init__(self, in_rate: int, out_rate: int, *, quality: str = "HQ") -> None:
+    def __init__(self, in_rate: int, out_rate: int, *, quality: str = MIC_PATH_QUALITY) -> None:
         try:
             import soxr
         except Exception as exc:  # noqa: BLE001
@@ -303,16 +331,17 @@ class SoxrResampler:
             ) from exc
         self.in_rate = in_rate
         self.out_rate = out_rate
-        self._stream = soxr.ResampleStream(
-            in_rate, out_rate, 1, dtype="int16", quality=quality
-        )
+        # Kept so a caller can assert WHICH trade it got: the mic path and the
+        # playback path want opposite ends of the delay/quality curve.
+        self.quality = quality
+        self._stream = soxr.ResampleStream(in_rate, out_rate, 1, dtype="int16", quality=quality)
 
     def process(self, pcm: np.ndarray) -> np.ndarray:
         out = self._stream.resample_chunk(pcm)
         return np.asarray(out, dtype=np.int16).reshape(-1)
 
 
-def make_resampler(in_rate: int, out_rate: int) -> Resampler:
+def make_resampler(in_rate: int, out_rate: int, *, quality: str = MIC_PATH_QUALITY) -> Resampler:
     """The only place a resampler is chosen, so 'no resampler on the desk path' is checkable.
 
     Equal rates return a passthrough object rather than None: callers should not
@@ -321,4 +350,4 @@ def make_resampler(in_rate: int, out_rate: int) -> Resampler:
     """
     if in_rate == out_rate:
         return NullResampler(in_rate)
-    return SoxrResampler(in_rate, out_rate)
+    return SoxrResampler(in_rate, out_rate, quality=quality)

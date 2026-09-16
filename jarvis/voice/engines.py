@@ -1,12 +1,13 @@
 """Text in, PCM bytes out. AN ENGINE IS FORBIDDEN FROM TOUCHING A DEVICE.
 
 That single line of contract is what deletes the reference build's worst audio
-defect: its ``TTSPlayer.stop()`` calls the GLOBAL ``sd.stop()``, so stopping a
-spoken confirmation would also kill the Live session's output stream — a bug you
-cannot fix without changing who owns the device, because any engine that opens
-its own stream is invisible to the mixer, invisible to the AEC reference tap,
-and able to stop somebody else's audio. Here the only object that ever opens a
-stream is the one audio bus; engines return bytes and are pure from the outside.
+defect: its TTS player both synthesises AND plays, and its stop path calls the
+process-global stop, so stopping a spoken confirmation would also kill the Live
+session's output stream — a bug you cannot fix without changing who owns the
+device, because any engine that opens its own stream is invisible to the mixer,
+invisible to the AEC reference tap, and able to stop somebody else's audio. Here
+the only object that ever opens a stream is the one audio bus; engines return
+bytes and are pure from the outside.
 
 EVERYTHING IS 24 kHz MONO PCM16 LE. Gemini Live output, Gemini TTS, Kokoro and
 edge-tts are all natively 24 kHz, so the rate collision is designed out rather

@@ -97,17 +97,22 @@ class MicBus:
         n = pcm.shape[0]
         if n == 0:
             return
-        # A block longer than the whole ring can only be a bug upstream, but
-        # dropping the call would hide it and raising would kill the audio
-        # thread, so keep the newest capacity samples and let the readers' drop
-        # counters make it visible.
+        # A block longer than the whole ring can only be a bug upstream. Dropping
+        # the call would hide it and raising would kill the audio thread, so keep
+        # the newest capacity samples — and ADVANCE THE CURSOR SPACE BY THE FULL
+        # LENGTH, so the samples that were thrown away show up in every reader's
+        # drop counter. Advancing only by what was kept would make the loss
+        # arithmetically invisible, which is the exact failure this ring exists
+        # to prevent.
+        skipped = 0
         if n > self._cap:
+            skipped = n - self._cap
             pcm = pcm[-self._cap :]
             n = self._cap
         with self._cond:
             if self._closed:
                 raise BusClosed("write to a closed MicBus")
-            start = self._written % self._cap
+            start = (self._written + skipped) % self._cap
             end = start + n
             if end <= self._cap:
                 self._buf[start:end] = pcm
@@ -115,12 +120,10 @@ class MicBus:
                 split = self._cap - start
                 self._buf[start:] = pcm[:split]
                 self._buf[: end - self._cap] = pcm[split:]
-            self._written += n
+            self._written += n + skipped
             self._cond.notify_all()
 
-    def read(
-        self, cursor: int, n: int, timeout: float = 0.5
-    ) -> tuple[np.ndarray | None, int, int]:
+    def read(self, cursor: int, n: int, timeout: float = 0.5) -> tuple[np.ndarray | None, int, int]:
         """Read ``n`` samples from ``cursor``.
 
         Returns ``(pcm, next_cursor, dropped)``. ``pcm`` is None when the timeout
@@ -217,6 +220,17 @@ class MicReader:
 
     @property
     def available(self) -> int:
+        """How many samples this reader can actually still be served.
+
+        Clamped to the ring, because the raw backlog of a reader that fell behind
+        is a number it can never obtain — reporting it would have `drain` loop on
+        audio that no longer exists. Use :attr:`behind` for the raw backlog.
+        """
+        return min(max(0, self.bus.written - self.cursor), self.bus.capacity)
+
+    @property
+    def behind(self) -> int:
+        """Raw distance from the live edge, INCLUDING samples already overwritten."""
         return max(0, self.bus.written - self.cursor)
 
     @property

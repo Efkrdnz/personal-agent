@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from typing import Any, NamedTuple
 
 from jarvis.cc import narrate
 from jarvis.voice.router import VERBATIM_TRACK, EarconMark, Fidelity, Utterance
@@ -40,6 +40,7 @@ from jarvis.voice.verbatim import VerbatimSpeaker
 __all__ = [
     "ABBREVIATIONS",
     "MAX_RUN_CHARS",
+    "PrefetchItem",
     "SentenceSplitter",
     "disclosure_clip",
     "narration_clips",
@@ -170,31 +171,51 @@ def narration_clips(
     )
 
 
-def texts_to_prefetch(clips: Iterable[Utterance]) -> tuple[tuple[str, str], ...]:
-    """Unique ``(text, lang)`` for every clip the reader will have to synthesise.
+class PrefetchItem(NamedTuple):
+    """One clip to warm, with everything that decides WHICH engine will serve it.
+
+    ``exact`` is carried rather than derived later because the engine ladder
+    branches on it: an engine that is neither deterministic nor probe-verified is
+    barred from an answer key. Prefetching without it warms the cache under the
+    wrong engine's key — and since the key includes the engine name, the clip
+    that finally gets spoken is a full synthesis at the exact moment the
+    pre-synthesis existed to keep quiet.
+    """
+
+    text: str
+    lang: str
+    exact: bool
+
+
+def texts_to_prefetch(clips: Iterable[Utterance]) -> tuple[PrefetchItem, ...]:
+    """Unique :class:`PrefetchItem` for every clip the reader will have to synthesise.
 
     Free-tier clips that are going to the conversational voice are skipped:
     synthesising them would be work for audio nobody plays.
     """
-    seen: dict[tuple[str, str], None] = {}
+    seen: dict[PrefetchItem, None] = {}
     for clip in clips:
         if clip.track == VERBATIM_TRACK or clip.load_bearing:
-            seen.setdefault((clip.text, clip.lang), None)
+            seen.setdefault(PrefetchItem(clip.text, clip.lang, clip.fidelity == "exact"), None)
     return tuple(seen)
 
 
 async def presynthesise(speaker: VerbatimSpeaker, clips: Iterable[Utterance]) -> int:
     """Warm the cache for a whole episode. Returns how many clips are ready.
 
+    Grouped by language AND by tier, because those are the two things that pick
+    an engine, and a clip warmed against an engine that may not read it is not
+    warmed at all.
+
     Never raises: a prefetch that fails is a slow question, while a prefetch
     that raises is a lost one. The refusal decision belongs at speaking time.
     """
-    by_lang: dict[str, list[str]] = {}
-    for text, lang in texts_to_prefetch(clips):
-        by_lang.setdefault(lang, []).append(text)
+    grouped: dict[tuple[str, bool], list[str]] = {}
+    for item in texts_to_prefetch(clips):
+        grouped.setdefault((item.lang, item.exact), []).append(item.text)
     ready = 0
-    for lang, texts in by_lang.items():
-        ready += await speaker.prefetch(texts, lang)
+    for (lang, exact), texts in grouped.items():
+        ready += await speaker.prefetch(texts, lang, exact=exact)
     return ready
 
 
@@ -233,7 +254,7 @@ ABBREVIATIONS: frozenset[str] = frozenset(
 MAX_RUN_CHARS = 400
 
 _TERMINATORS = ".!?…"
-_CLOSERS = ')]}"\'’”»'
+_CLOSERS = ")]}\"'’”»"
 _WORD = re.compile(r"[^\s]+$")
 
 

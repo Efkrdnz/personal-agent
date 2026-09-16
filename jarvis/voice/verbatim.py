@@ -41,7 +41,7 @@ from jarvis.voice.engines import (
     tone,
     validate_pcm,
 )
-from jarvis.voice.router import NoReader, PcmSink, Utterance
+from jarvis.voice.router import EarconMark, Fidelity, NoReader, PcmSink, Utterance
 
 __all__ = [
     "EARCON_HZ",
@@ -49,6 +49,7 @@ __all__ = [
     "EngineAttempt",
     "NoVerbatimEngine",
     "VerbatimSpeaker",
+    "duration_s",
     "earcon_pcm",
 ]
 
@@ -201,16 +202,24 @@ class VerbatimSpeaker:
         lang: str = "en",
         *,
         exact: bool = False,
-        earcon: str = "none",
+        earcon: EarconMark = "none",
+        tier: Fidelity | None = None,
     ) -> int:
-        """Synthesise and write. Returns bytes written, earcons included."""
+        """Synthesise and write. Returns bytes written, earcons included.
+
+        ``tier`` is handed on to the sink so the audio layer can enforce the
+        same rule on the samples that this layer enforces on the text. It
+        defaults from ``exact`` rather than being a second thing to remember.
+        """
         pcm = await self.pcm_for(text, lang, exact=exact)
+        content: Fidelity = tier if tier is not None else ("exact" if exact else "faithful")
         written = 0
         if earcon in ("open", "both"):
-            written += await self._write(sink, self.earcon())
-        written += await self._write(sink, pcm)
+            # The tone carries no words, so it is free-tier on any track.
+            written += await self._write(sink, self.earcon(), "free")
+        written += await self._write(sink, pcm, content)
         if earcon in ("close", "both"):
-            written += await self._write(sink, self.earcon())
+            written += await self._write(sink, self.earcon(), "free")
         return written
 
     async def speak(self, utt: Utterance) -> int:
@@ -227,11 +236,12 @@ class VerbatimSpeaker:
             utt.lang,
             exact=utt.fidelity == "exact",
             earcon=utt.earcon,
+            tier=utt.fidelity,
         )
 
     @staticmethod
-    async def _write(sink: PcmSink, pcm: bytes) -> int:
-        await sink.write(pcm)
+    async def _write(sink: PcmSink, pcm: bytes, tier: Fidelity) -> int:
+        await sink.write(pcm, tier=tier)
         return len(pcm)
 
 

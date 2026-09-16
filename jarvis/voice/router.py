@@ -33,8 +33,9 @@ perfect and is wrong.
 When the reader is dead the system REFUSES. It does not fall back to the
 paraphrase channel, ever. With a text channel attached it announces the failure
 in the Live voice and asks for the numbers off the screen; with no text channel
-(a phone leg) the question DEFERS. Both outcomes are recorded as a
-:class:`Refused` so the caller can see what happened to its text.
+(a phone leg) it says so in different words — there is no screen to point at —
+and the question DEFERS. Both outcomes are recorded as a :class:`Refused` so the
+caller can see what happened to its text.
 """
 
 from __future__ import annotations
@@ -48,6 +49,7 @@ from typing import Any, Literal, Protocol, runtime_checkable
 from jarvis.bus import Redactor, publish
 
 __all__ = [
+    "DEFERRAL_LINES",
     "EARCON_MARKS",
     "FIDELITIES",
     "LIVE_TRACK",
@@ -59,11 +61,13 @@ __all__ = [
     "FidelityViolation",
     "LiveSink",
     "Mirror",
+    "NoReader",
     "OutputRouter",
     "PcmSink",
     "Refused",
     "Spoken",
     "Track",
+    "TrackSink",
     "Utterance",
     "VerbatimSink",
     "assert_routable",
@@ -99,6 +103,31 @@ REFUSAL_LINES: dict[str, str] = {
         "Ekranda ve Telegram'da duruyorlar — bana numaraları söyle."
     ),
 }
+
+#: The SAME failure on a leg with no screen and no Telegram binding. It needs its
+#: own words rather than the line above, because "they're on screen" spoken down
+#: a phone line is a false statement, and a layer whose entire purpose is that
+#: the user can trust what they hear cannot afford one. The question defers; say
+#: that it defers.
+DEFERRAL_LINES: dict[str, str] = {
+    "en": (
+        "My reader voice isn't working, so I can't read you the options exactly, "
+        "and there's no screen on this line. I'm holding the question until I can "
+        "read it to you properly."
+    ),
+    "tr": (
+        "Okuyucu sesim çalışmıyor, bu yüzden seçenekleri birebir okuyamıyorum ve "
+        "bu hatta ekran yok. Sana düzgün okuyabilene kadar soruyu bekletiyorum."
+    ),
+}
+
+
+class NoReader(RuntimeError):
+    """A track this router was asked to use is not attached.
+
+    Its own type so the refusal path can tell "the engines all failed" from "the
+    leg was never wired up", which are the same sound and very different bugs.
+    """
 
 
 class FidelityViolation(RuntimeError):
@@ -173,9 +202,40 @@ class Utterance:
 
 @runtime_checkable
 class PcmSink(Protocol):
-    """Somewhere PCM16 mono 24 kHz bytes can be written. Usually an AudioBus track."""
+    """Somewhere PCM16 mono 24 kHz bytes can be written. Usually an AudioBus track.
 
-    async def write(self, pcm: bytes) -> None: ...
+    ``tier`` travels with the bytes so the audio layer can apply the SAME rule to
+    audio that this layer applies to text. Without it the mixer would be looking
+    at an anonymous block of samples and could only trust that whoever produced
+    it did the right thing, which is precisely the trust this design refuses.
+    """
+
+    async def write(self, pcm: bytes, *, tier: Fidelity = "free") -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrackSink:
+    """The seam onto a ``jarvis.audio`` mixer track. Bytes in, samples out.
+
+    THE SECOND OF THE TWO CHECKS. The router refuses to ROUTE exact text to the
+    paraphrase track; the mixer refuses to ACCEPT exact audio on a track that
+    cannot carry it. Neither subsumes the other: the router also guards text
+    that never becomes audio at all (a Telegram render, a phone leg with no
+    reader), and the mixer also guards audio that reached a track by some route
+    the router never saw. Two layers, because the failure is inaudible.
+
+    numpy is imported inside the call, not at module scope, so the voice layer
+    keeps importing on a machine with no audio stack whatsoever.
+    """
+
+    track: Any
+
+    async def write(self, pcm: bytes, *, tier: Fidelity = "free") -> None:
+        import numpy as np
+
+        # frombuffer is a read-only view over bytes we do not own; the mixer
+        # queues what it is given, so it gets a copy it may treat as its own.
+        self.track.write(np.frombuffer(pcm, dtype="<i2").copy(), tier=tier)
 
 
 @runtime_checkable
@@ -244,9 +304,16 @@ def assert_routable(utt: Utterance, track: Track) -> None:
         )
 
 
-def refusal_line(lang: str) -> str:
-    """What Jarvis says when the reader is dead. Paraphrase is fine; silence is not."""
-    return REFUSAL_LINES.get(lang.split("-")[0].lower(), REFUSAL_LINES["en"])
+def refusal_line(lang: str, *, has_text_channel: bool = True) -> str:
+    """What Jarvis says when the reader is dead. Paraphrase is fine; silence is not.
+
+    ``has_text_channel`` picks between "read them off the screen" and "I'm
+    holding the question", which are different promises. Telling a phone caller
+    to look at a screen is worse than saying nothing: it sounds like a recovery
+    and leaves them waiting for options that were never sent anywhere.
+    """
+    table = REFUSAL_LINES if has_text_channel else DEFERRAL_LINES
+    return table.get(lang.split("-")[0].lower(), table["en"])
 
 
 def publish_said(
@@ -291,6 +358,23 @@ def publish_said(
         redactor=redactor,
         idem_key=idem_key,
     )
+
+
+@dataclass(slots=True)
+class _Episode:
+    """What one :meth:`OutputRouter.drain` has already done about a failure.
+
+    Per-drain, not per-router: the apology is once per episode, and an episode is
+    exactly one drain. ``apologies`` holds IDENTITIES rather than tags because a
+    tag is caller-supplied and "is this the clip I just manufactured?" must not
+    be answerable by a caller that happens to pick the same string.
+    """
+
+    announced: set[str] = field(default_factory=set)
+    apologies: list[Utterance] = field(default_factory=list)
+
+    def manufactured(self, utt: Utterance) -> bool:
+        return any(a is utt for a in self.apologies)
 
 
 @dataclass
@@ -341,13 +425,13 @@ class OutputRouter:
         refusal means for ITS turn.
         """
         out: list[Delivery] = []
-        announced: set[str] = set()
+        episode = _Episode()
         while self._queue:
             utt = self._queue.popleft()
-            out.append(await self._deliver(utt, announced))
+            out.append(await self._deliver(utt, episode))
         return tuple(out)
 
-    async def _deliver(self, utt: Utterance, announced: set[str]) -> Delivery:
+    async def _deliver(self, utt: Utterance, episode: _Episode) -> Delivery:
         track = self._track_for(utt)
         assert_routable(utt, track)
         try:
@@ -366,46 +450,54 @@ class OutputRouter:
             # session drops mid-turn are not enumerable from here. What matters
             # is that NO exception can end with the paraphrase channel quietly
             # reading an answer key, so everything lands in the refusal path.
-            if utt.fidelity == "free" and track == LIVE_TRACK:
+            #
+            # Ordinary free-tier prose is the one exception: a narration clip
+            # the live session dropped is a session problem, not a fidelity one,
+            # and the caller should see it. An apology THIS ROUTER manufactured
+            # is not ordinary prose — if it could raise, the refusal path would
+            # be abortable by the thing it just queued, and the load-bearing
+            # clips still in the queue would be dropped unmirrored and
+            # undeferred: exactly the silent loss the refusal exists to prevent.
+            if utt.fidelity == "free" and track == LIVE_TRACK and not episode.manufactured(utt):
                 raise
-            return self._refuse(utt, f"{type(exc).__name__}: {exc}", announced)
+            return self._refuse(utt, f"{type(exc).__name__}: {exc}", episode)
         if self.mirror is not None and utt.mirror:
             self.mirror(utt, track)
         return Spoken(utterance=utt, track=track, nbytes=nbytes)
 
-    def _refuse(self, utt: Utterance, reason: str, announced: set[str]) -> Refused:
+    def _refuse(self, utt: Utterance, reason: str, episode: _Episode) -> Refused:
+        action: Literal["announced", "deferred"] = (
+            "announced" if self.has_text_channel else "deferred"
+        )
+        # An apology that itself failed is recorded and otherwise dropped. It
+        # gets no apology of its own — that is a fixed point that feeds itself,
+        # since each failure queues a clip with a new tag and the per-tag dedupe
+        # never fires — and it is not deferred either: the QUESTION defers, and
+        # handing the gate a line of Jarvis's own prose is how a channel ends up
+        # holding a request that was never asked.
+        if episode.manufactured(utt):
+            return Refused(utterance=utt, reason=reason, action=action)
         # The text still reaches the screen. That is not a consolation prize:
         # the announcement below tells the user to read it there, so mirroring
         # is what makes the refusal recoverable instead of a dead end.
         if self.mirror is not None:
             self.mirror(utt, None)
-        if utt.tag not in announced:
-            announced.add(utt.tag)
+        if utt.tag not in episode.announced:
+            episode.announced.add(utt.tag)
             if self.live is not None:
-                self._queue.appendleft(
-                    Utterance(
-                        text=refusal_line(utt.lang),
-                        fidelity="free",
-                        lang=utt.lang,
-                        tag=f"{utt.tag}:refusal" if utt.tag else "refusal",
-                        track=LIVE_TRACK,
-                        request_id=utt.request_id,
-                    )
+                apology = Utterance(
+                    text=refusal_line(utt.lang, has_text_channel=self.has_text_channel),
+                    fidelity="free",
+                    lang=utt.lang,
+                    tag=f"{utt.tag}:refusal" if utt.tag else "refusal",
+                    track=LIVE_TRACK,
+                    request_id=utt.request_id,
                 )
-        action: Literal["announced", "deferred"] = (
-            "announced" if self.has_text_channel else "deferred"
-        )
+                episode.apologies.append(apology)
+                self._queue.appendleft(apology)
         if action == "deferred" and self.on_defer is not None:
             # A phone leg has no screen and no Telegram binding, so there is
             # nowhere for the options to be read. The question goes back to the
             # gate and waits for a channel that can carry it.
             self.on_defer(utt, reason)
         return Refused(utterance=utt, reason=reason, action=action)
-
-
-class NoReader(RuntimeError):
-    """A track this router was asked to use is not attached.
-
-    Its own type so the refusal path can tell "the engines all failed" from "the
-    leg was never wired up", which are the same sound and very different bugs.
-    """

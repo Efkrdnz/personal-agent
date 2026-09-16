@@ -46,7 +46,7 @@ import unicodedata
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
@@ -77,7 +77,7 @@ __all__ = [
 ]
 
 
-class TurnState(str, Enum):
+class TurnState(StrEnum):
     IDLE = "idle"
     SUSPECT = "suspect"
     USER_SPEAKING = "user_speaking"
@@ -190,9 +190,7 @@ class TurnController:
         self._clock = clock
         self._frame_ms = 1000 * vad.frame_samples / rate
         self._hangover_frames = max(1, round(hangover_ms / self._frame_ms))
-        self._preroll: deque[np.ndarray] = deque(
-            maxlen=max(1, round(preroll_ms / self._frame_ms))
-        )
+        self._preroll: deque[np.ndarray] = deque(maxlen=max(1, round(preroll_ms / self._frame_ms)))
         self._state = TurnState.IDLE
         self._onset_run = 0
         self._silence_run = 0

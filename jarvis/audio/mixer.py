@@ -5,9 +5,11 @@ owns it, and the post-fader post-mix array returned by :meth:`PlaybackMixer.pull
 is simultaneously what goes to the device and what goes to the echo canceller as
 the far-end reference. That identity is the whole point: anything that plays
 audio by another route is invisible to the AEC and WILL be heard as uncancellable
-echo. The reference build could not have this property — its TTS engines each
-synthesised AND played, and ``TTSPlayer.stop()`` called the global ``sd.stop()``,
-which would have killed the Live session's output stream as collateral damage.
+echo. The failure mode being designed out is an engine that both synthesises and
+plays: stopping one such player means calling the LIBRARY-GLOBAL stop, which
+takes down every other stream in the process — including the Live session's —
+as collateral damage. Here an engine returns bytes and only this object has a
+device at all, so the collision cannot be expressed.
 
 TWO INVARIANTS ARE ENFORCED HERE RATHER THAN DOCUMENTED.
 
@@ -47,7 +49,7 @@ from typing import Literal
 import numpy as np
 
 from jarvis.audio import BUS_RATE, LIVE_TTL_S, MONITOR_DB
-from jarvis.audio.dsp import Resampler, make_resampler
+from jarvis.audio.dsp import PLAYBACK_QUALITY, Resampler, make_resampler
 
 __all__ = [
     "AudioBus",
@@ -108,6 +110,7 @@ class Track:
         ttl_s: float | None = None,
         mixed: bool = False,
         carries_exact: bool = True,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.name = name
         self.prio = prio
@@ -117,8 +120,17 @@ class Track:
         self.ttl_s = ttl_s
         self.mixed = mixed
         self.carries_exact = carries_exact
+        # THE STAMP AND THE SWEEP MUST SHARE A CLOCK. prune() compares against
+        # whatever the mixer was pulled with, and the graph pulls with a clock
+        # counted in SAMPLES starting at zero — not time.monotonic(). A track
+        # that stamped its arrivals with the wall clock would compute
+        # `now - at` as a large negative number forever and the 2 s staleness
+        # TTL would silently never fire, which is exactly the barge-in bug it
+        # exists to prevent and is invisible in any test that passes `at`.
+        self._clock = clock
         self._queue: deque[_Chunk] = deque()
-        self._resampler: Resampler = make_resampler(content_rate, rate)
+        # PLAYBACK_QUALITY, not the mic path's: this is what the user hears.
+        self._resampler: Resampler = make_resampler(content_rate, rate, quality=PLAYBACK_QUALITY)
         self._dropped_stale = 0
         self._lock = threading.Lock()
 
@@ -145,7 +157,7 @@ class Track:
         if converted.size == 0:
             return
         with self._lock:
-            self._queue.append(_Chunk(converted, time.monotonic() if at is None else at, tier))
+            self._queue.append(_Chunk(converted, self._clock() if at is None else at, tier))
 
     @property
     def pending(self) -> int:
@@ -194,7 +206,7 @@ class Track:
         with self._lock:
             while self._queue and now - self._queue[0].at > self.ttl_s:
                 dropped += self._queue.popleft().pcm.shape[0]
-        self._dropped_stale += dropped
+            self._dropped_stale += dropped
         return dropped
 
     def take(self, n: int) -> np.ndarray:
@@ -272,8 +284,9 @@ class PlaybackMixer:
     ) -> Track:
         """Create a track. Defaults come from the priority, so the caller cannot
         accidentally create a LIVE track that accepts exact text."""
-        if name in self._tracks:
-            raise ValueError(f"track {name!r} already exists on this mixer")
+        with self._lock:
+            if name in self._tracks:
+                raise ValueError(f"track {name!r} already exists on this mixer")
         if prio is Prio.LIVE:
             carries_exact, mixed = False, False
             ttl_s = LIVE_TTL_S if ttl_s is None else ttl_s
@@ -291,8 +304,14 @@ class PlaybackMixer:
             ttl_s=ttl_s,
             mixed=mixed,
             carries_exact=carries_exact,
+            clock=self._clock,
         )
-        self._tracks[name] = tr
+        # Published under the lock and read through _live(): a track created by
+        # the live session's thread while the PortAudio callback is mid-pull
+        # would otherwise raise "dictionary changed size during iteration"
+        # INSIDE the audio callback, which is a dropout you can hear.
+        with self._lock:
+            self._tracks[name] = tr
         return tr
 
     def get(self, name: str) -> Track:
@@ -303,7 +322,15 @@ class PlaybackMixer:
 
     @property
     def tracks(self) -> dict[str, Track]:
-        return dict(self._tracks)
+        with self._lock:
+            return dict(self._tracks)
+
+    def _live(self) -> tuple[Track, ...]:
+        """A snapshot to iterate. Never iterate ``self._tracks`` directly: every
+        caller below can be the audio callback, and a track created elsewhere
+        mid-iteration would raise inside it."""
+        with self._lock:
+            return tuple(self._tracks.values())
 
     # -- the one output stream ------------------------------------------------
 
@@ -358,7 +385,7 @@ class PlaybackMixer:
         """Fade and drop every track below ``prio``. Returns samples discarded."""
         fade = max(1, int(self.rate * fade_ms / 1000))
         dropped = 0
-        for tr in self._tracks.values():
+        for tr in self._live():
             if tr.prio < prio and not tr.mixed:
                 before = tr.pending
                 tr.fade_out(fade)
@@ -374,7 +401,7 @@ class PlaybackMixer:
         depended on.
         """
         dropped = 0
-        for tr in self._tracks.values():
+        for tr in self._live():
             if below is None or tr.prio < below:
                 dropped += tr.flush()
         return dropped
@@ -402,10 +429,10 @@ class PlaybackMixer:
     @property
     def is_playing(self) -> bool:
         """Is Jarvis making a sound right now? The TurnController's speaking flag."""
-        return any(tr.pending > 0 for tr in self._tracks.values() if not tr.mixed)
+        return any(tr.pending > 0 for tr in self._live() if not tr.mixed)
 
     def speaking_track(self) -> Track | None:
-        candidates = [t for t in self._tracks.values() if not t.mixed and t.pending > 0]
+        candidates = [t for t in self._live() if not t.mixed and t.pending > 0]
         return max(candidates, key=lambda t: t.prio) if candidates else None
 
     # -- the pull -------------------------------------------------------------
@@ -421,15 +448,17 @@ class PlaybackMixer:
         now = self._clock() if at is None else at
         acc = np.zeros(n, dtype=np.float32)
         if not self._stopped:
-            for tr in self._tracks.values():
+            live = self._live()
+            for tr in live:
                 tr.prune(now)
             # Exclusive, not summed: while the reader speaks option labels,
             # Gemini's audio is HELD. Two voices over each other is exactly the
             # failure that makes reading them verbatim pointless.
-            exclusive = self.speaking_track()
+            candidates = [t for t in live if not t.mixed and t.pending > 0]
+            exclusive = max(candidates, key=lambda t: t.prio) if candidates else None
             if exclusive is not None:
                 acc += exclusive.take(n).astype(np.float32) * exclusive.gain
-            for tr in self._tracks.values():
+            for tr in live:
                 if tr.mixed and tr.pending > 0:
                     acc += tr.take(n).astype(np.float32) * tr.gain
         out = self._apply_fader(acc, n)
