@@ -10,6 +10,29 @@ Two dates matter more than the rest:
 
 ---
 
+## Status — 16 September 2026
+
+Stage 0 and the stage-1 spine are built. What is actually true today, as opposed to planned:
+
+| | |
+|---|---|
+| **Spike S1** | **PASS, run for real.** Cross-process plan-mode answering, and defer → SIGKILL → 180s gap → resume → answer replayed. Cost $0.12. See [`spikes/s0_crossproc/RESULTS.md`](../spikes/s0_crossproc/RESULTS.md). |
+| **Probe S9(c)** | A `can_use_tool` callback survives a 3-minute block (measured). The 90-minute case has a probe: `tools/probe_long_block.py`. |
+| **The spine** | Built: `bus`, `requests`, `jobs`, `reconcile`, `effects`, `presence`, `kill`, `ledger`, on `db`/`ids`/`clock`. 455 tests, stdlib-only, integration-tested across connections. |
+| **CI guards** | Secret patterns verified against real `git check-ignore`; a smoke alarm for CC BY-NC reference code. |
+
+Three findings from S1 changed the plan and are recorded in `RESULTS.md`: `tool_use_id` is stable across
+resume (so `dedupe_key` is a convenience, not a correctness mechanism); a `PreToolUse` hook **can** return
+`defer` (the research's refutation was wrong for this build); and `AskUserQuestion` must never appear in
+`allowed_tools`.
+
+**One thing worth watching.** The spine is ~4,700 lines of code where the architecture claimed the
+coordination layer would be "about 400 lines, not a framework". The API surface looks purposeful rather than
+speculative, but this is the risk the design flagged against itself, and the two falsifiable tests at the end
+of this document are what will settle it.
+
+---
+
 ## Stage 0 first — nine spikes, two days
 
 Nine cheap experiments, each killing a hypothesis whose failure would invalidate part of the design. Every
