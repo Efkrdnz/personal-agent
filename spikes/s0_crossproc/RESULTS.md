@@ -140,9 +140,16 @@ commit, is not optional** — and a silent rollback is indistinguishable from a 
 
 ## Still unproven
 
-- Whether `can_use_tool` can block for **90 minutes** without the CLI reaping it (probe S9(c)). The
-  longest block measured here was seconds. This matters: if the CLI reaps long-pending callbacks, the
-  at-desk flow silently becomes defer-only.
+- Whether `can_use_tool` can block for **90 minutes** without the CLI reaping it (probe S9(c)).
+  **Measured so far: 9 minutes passes** — `tools/probe_long_block.py --seconds 540` held the callback for
+  540s, was not reaped, and the answer landed (`stop_reason=end_turn`, Claude built on the choice). That is
+  past the longest documented `askUserQuestionTimeout` value (10m is the maximum setting; 5m is the middle
+  one), so the at-desk "wander off and come back" flow is real for realistic gaps.
+
+  90 minutes remains **unproven, and could not be tested here**: this container reaps detached background
+  processes when the launching tool call returns, and the command timeout caps at 10 minutes. Re-run
+  `--seconds 5400` on the target machine before relying on an hour-plus block. The defer path exists for
+  exactly this case and does not depend on the answer.
 - Behaviour when **sibling tool calls** are in the same batch as the deferred one — the research warns
   defer is silently ignored there.
 - Everything about **cloud sessions**, where defer is documented as refused outright.

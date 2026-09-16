@@ -10,6 +10,21 @@ dependencies = []
 # project relies on are undocumented internals of one CLI build, and a voice
 # daemon auto-updating its bundled CLI is exactly the failure mode.
 cc = ["claude-agent-sdk>=0.2.153,<0.3"]
+# The desk audio graph. Every one of these is optional at import time: the graph
+# runs end to end on synthetic audio with passthrough DSP and no device at all,
+# which is what makes it testable in CI and on a box with no sound card.
+#   pywebrtc-audio is WebRTC AEC3 (the algorithm in Chrome) with wheels for
+#   cp310-cp314 across manylinux/musllinux/macOS/Windows, and it releases the GIL
+#   so it can run inside the PortAudio callback. The three obvious alternatives
+#   are dead: pyaudio-webrtc-apm does not exist on PyPI, speexdsp last shipped in
+#   2018, webrtc-audio-processing ships armv7l wheels only.
+voice = ["numpy>=2", "sounddevice>=0.5.6", "soxr>=1.1"]
+aec = ["pywebrtc-audio>=0.2"]
+# The Gemini Live session. gemini-3.8-live is the current model; the build
+# sheet's gemini-3.1-flash-live-preview is legacy. The SDK README warns to pin
+# below 3.0.0.
+live = ["google-genai>=2.23,<3"]
+tts = ["edge-tts>=7"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
 
 [build-system]

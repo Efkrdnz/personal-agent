@@ -37,8 +37,9 @@ reading docs. Full detail in [`spikes/s0_crossproc/RESULTS.md`](spikes/s0_crossp
   callback is consulted, and settings files can shadow it invisibly.
 - `permission_mode` must never be `"dontAsk"` — it *denies* `AskUserQuestion`. The schema has a CHECK
   constraint refusing it.
-- A `can_use_tool` callback survives at least a 3-minute block (measured). The 90-minute case is probed by
-  `tools/probe_long_block.py`.
+- A `can_use_tool` callback survives a **9-minute** block (measured: held 540s, not reaped, answer landed).
+  That is past the 5-minute `askUserQuestionTimeout` setting. The 90-minute case is still unproven — re-run
+  `tools/probe_long_block.py --seconds 5400` on the target machine.
 - The current Gemini Live model is `gemini-3.8-live`, **not** the `gemini-3.1-flash-live-preview` the build
   sheet named. Pin `google-genai>=2.23,<3`. `speech_config.language_code` does **not** control output
   language on native-audio models.
