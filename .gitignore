@@ -1,0 +1,53 @@
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+# NOTE: git has no trailing-comment syntax. A '#' only starts a comment at the
+# START of a line. "secrets.json  # my key" is a literal pattern that matches
+# nothing — which is exactly how the reference build silently published its key.
+# Keep every comment on its own line. Verify with: git check-ignore -v <path>
+.env
+.env.*
+!.env.example
+secrets.json
+config/api_keys.json
+*credentials*.json
+**/token*.json
+**/client_secret*.json
+*.pem
+*.key
+!**/public*.key
+certs/
+
+# ─── Local state (never commit; contains transcripts, spend, and activity) ────
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+var/
+logs/
+screenshots/
+
+# ─── Python ───────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# ─── Models / large artefacts ─────────────────────────────────────────────────
+*.onnx
+*.tflite
+models/
+
+# ─── OS / editor ──────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
