@@ -266,3 +266,31 @@ def test_free_text_for_a_question_nobody_asked_is_refused_not_dropped() -> None:
     # it is, rather than as an empty batch.
     with pytest.raises(AnswerShapeError):
         answers_from_indices(SINGLE, [], free_text={"Some other question?": "Postgres"})
+
+
+@pytest.mark.parametrize("text", [b"\x01", b"", "1", "one"])
+def test_text_is_never_coerced_into_option_indices(text: object) -> None:
+    """Both pick shapes must refuse text, and for the same reason.
+
+    ``bytes`` is the case that actually bit: it IS a ``Sequence``, so ``b"\\x01"``
+    iterated as ``[1]`` and silently picked option one. The flat branch had always
+    refused ``str`` and ``bytes``; the mapping branch refused only ``str``, so the
+    same payload was rejected one way and honoured the other.
+
+    An option chosen in silence is the precise failure this module exists to make
+    impossible, so it is refused on both shapes rather than coerced on either.
+    """
+    single = {
+        "questions": [
+            {
+                "question": "q",
+                "header": "h",
+                "multiSelect": False,
+                "options": [{"label": "A"}, {"label": "B"}],
+            }
+        ]
+    }
+    with pytest.raises(AnswerShapeError, match="not text"):
+        answers_from_indices(single, {"q": text})  # type: ignore[dict-item]
+    with pytest.raises(AnswerShapeError, match="not text"):
+        answers_from_indices(single, text)  # type: ignore[arg-type]

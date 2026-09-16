@@ -261,7 +261,15 @@ def _picks_by_question(
             if not any(s.question == question for s in sl):
                 raise AnswerShapeError(f"nobody asked {question!r}")
             grouped.setdefault(question, [])
-            many = isinstance(value, Sequence) and not isinstance(value, str)
+            # Same refusal as the flat branch below, and for the same reason. It
+            # was missing here, and bytes are the case that bites: they ARE a
+            # Sequence, so b"\x01" iterated as [1] and silently picked option
+            # one. A wrong option chosen in silence is the exact failure this
+            # module exists to make impossible, so text is refused rather than
+            # coerced — on both shapes, with one message.
+            if isinstance(value, (str, bytes)):
+                raise AnswerShapeError("picks are option indices, not text")
+            many = isinstance(value, Sequence)
             values = value if many else [value]
             for index in values:
                 add(index, question)
