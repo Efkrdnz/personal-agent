@@ -18,8 +18,13 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv python install 3.11
 
+      # The cc extra is needed to RUN the tests, never to reach the network: the
+      # Claude Code driver's tests fake the client and construct the SDK's own
+      # message dataclasses, which is the only way the recorded payload shapes
+      # can be checked on every commit without a credential. The spine still
+      # imports on a bare interpreter; the step at the bottom proves it.
       - name: Install
-        run: uv venv && uv pip install -e '.[dev]'
+        run: uv venv && uv pip install -e '.[cc,dev]'
 
       # Runs first and on its own: if a secret pattern has gone inert, that is
       # the most urgent thing in the log, not something to find under a lint dump.
