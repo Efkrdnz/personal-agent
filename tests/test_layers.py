@@ -174,3 +174,47 @@ def test_nothing_below_the_project_lifecycle_imports_it() -> None:
             if name == "jarvis.project" or name.startswith("jarvis.project.")
         ]
         assert not reached, "\n".join(reached)
+
+
+def test_the_briefing_does_not_know_how_it_is_delivered() -> None:
+    """Stage 5's seam. A section is a row; which channel says it is decided elsewhere.
+
+    An import of the desk here would mean the briefing could only ever be spoken,
+    an import of Telegram that it could only ever be tapped, and stage 6's phone
+    would be a rewrite rather than one more channel reading the same rows.
+    """
+    reached = [
+        f"{path.relative_to(ROOT).as_posix()} imports {name}"
+        for path in modules_of("jarvis/briefing", ROOT)
+        for name in sorted(imports_of(path, ROOT))
+        if name.startswith(
+            ("jarvis.cc", "jarvis.voice", "jarvis.audio", "jarvis.live", "jarvis.telegram")
+        )
+    ]
+    assert not reached, "\n".join(reached)
+
+    # And it DOES reach down to both layers below it, so the rule is not passing
+    # because the package happens to import nothing at all.
+    imported = {
+        name for path in modules_of("jarvis/briefing", ROOT) for name in imports_of(path, ROOT)
+    }
+    assert any(n.startswith("jarvis.github") for n in imported)
+    assert "jarvis.requests" in imported
+    assert "jarvis.reconcile" in imported
+
+
+def test_nothing_below_the_briefing_imports_it() -> None:
+    """The other direction, which is the half that actually decays.
+
+    ``jarvis.reconcile.project_status`` composes the briefing's first section, so
+    the spine is exactly where a back-import would feel natural and be wrong: the
+    spine has to keep importing under ``python -S`` on a box with no network.
+    """
+    for layer in ("spine", "jarvis/github"):
+        reached = [
+            f"{path.relative_to(ROOT).as_posix()} imports {name}"
+            for path in modules_of(layer, ROOT)
+            for name in sorted(imports_of(path, ROOT))
+            if name == "jarvis.briefing" or name.startswith("jarvis.briefing.")
+        ]
+        assert not reached, "\n".join(reached)

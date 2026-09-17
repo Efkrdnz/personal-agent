@@ -45,6 +45,28 @@ reading docs. Full detail in [`spikes/s0_crossproc/RESULTS.md`](spikes/s0_crossp
   sheet named. Pin `google-genai>=2.23,<3`. `speech_config.language_code` does **not** control output
   language on native-audio models.
 
+## Traps found the hard way
+
+Things that are true, non-obvious, and will cost you an afternoon if you assume otherwise.
+
+- **`UNIQUE(job_id, dedupe_key, attempt)` does not constrain rows where `job_id` IS NULL.** SQLite treats
+  NULLs in a unique index as distinct, and a briefing gate has no job. Verified: two identical NULL-job rows
+  insert happily. Idempotency there rests on the `SELECT` inside `create_request`'s `BEGIN IMMEDIATE`, not on
+  the index a reader would point at.
+- **"Five minutes re-queues by writing `deliver_after`" is not literally possible.** `answer_request` is a
+  compare-and-swap that settles every open delivery in the same transaction, so the original row cannot stay
+  pending once the user taps. The honest shape is: answer it, then re-ask the *same occurrence* at
+  `attempt + 1` with the new delivery's `due_at`. The roadmap's wording predates the spine.
+- **`create_request` has no `now_ts` injection.** It reads the spine's own `now()`, so a test advancing an
+  injected clock cannot make its own requests expire on that fake clock. It is the one place "inject the
+  clock" does not reach.
+- **A task-completion notice has no request kind of its own** and borrows `free_text`. A notice is a request
+  whose answer is *optional*, and `REQ_KINDS` has no word for that — so a reader of the table cannot tell
+  news from a question by kind alone.
+- **Two migrations must never share a number.** `db.migrate()` applies by integer prefix and bumps
+  `user_version`, so a duplicate silently applies one and skips the other. Two parallel agents hit this;
+  there is now a test for it.
+
 ## The rules that are load-bearing
 
 Full versions in [`CONTRIBUTING.md`](CONTRIBUTING.md). The short form:

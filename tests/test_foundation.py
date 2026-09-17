@@ -112,6 +112,50 @@ def test_open_db_applies_every_migration_and_sets_user_version(dbfile: Path) -> 
     assert {"events", "jobs", "requests", "effects", "spend", "outbox"} <= tables
 
 
+def test_a_database_built_before_a_migration_existed_upgrades_and_keeps_its_data(
+    dbfile: Path,
+    tmp_path: Path,
+) -> None:
+    """The test everybody skips: the upgrade path, not the fresh-install path.
+
+    A fresh ``open_db`` runs every migration at once and so proves nothing about
+    what happens to the database that is already on the user's disk — the one
+    holding every question ever asked. This builds a real 001-era file, puts rows
+    in it, and then runs the migrations that were written afterwards.
+    """
+    early = tmp_path / "early"
+    early.mkdir()
+    (early / "001_init.sql").write_text((db.MIGRATIONS_DIR / "001_init.sql").read_text())
+
+    con = db.connect(dbfile)
+    assert db.migrate(con, migrations_dir=early) == 1
+    con.execute(
+        "INSERT INTO cursors (name, value, updated_at) VALUES (?,?,?)",
+        ("briefing_last_run", "2026-01-01T00:00:00.000Z", now()),
+    )
+    con.execute(
+        "INSERT INTO events (id, ts, kind, actor, payload, idem_key, prev_hash, hash)"
+        " VALUES ('ev1', '2026-01-01T00:00:00.000Z', 'test', 'me', '{}', 'k1', '', 'h')"
+    )
+    before = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+    version = db.migrate(con)
+    assert version > 1
+    assert db.migrate(con) == version  # idempotent over the NEW migrations too
+
+    after = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    # Everything 001 built is still there, and the later migrations only added.
+    assert before < after
+    assert {"briefings", "briefing_sections", "briefing_seen", "schedules"} <= after
+    # And nothing that was in the old file was lost on the way through.
+    assert (
+        con.execute("SELECT value FROM cursors WHERE name='briefing_last_run'").fetchone()[0]
+        == "2026-01-01T00:00:00.000Z"
+    )
+    assert con.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+    con.close()
+
+
 def test_migrate_is_idempotent(dbfile: Path) -> None:
     con = db.open_db(dbfile)
     v1 = db.migrate(con)

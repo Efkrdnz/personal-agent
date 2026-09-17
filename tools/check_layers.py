@@ -52,6 +52,18 @@ RULES: dict[str, tuple[str, ...]] = {
         # is NOT the spine knowing how to make one: the spine has to keep
         # importing under `python -S` on a box with no token and no workspace.
         "jarvis.project",
+        # Stage 5's. `jarvis.reconcile.project_status` composes the briefing's
+        # first section and `jarvis.requests` carries every other one, but
+        # neither may know the briefing exists: the briefing reads Gmail, GitHub
+        # and YouTube, and the spine has to keep importing on a box with no
+        # network at all.
+        "jarvis.briefing",
+        # The other half of stage 5. `requests` knows the `briefing_gate` KIND —
+        # what such a question looks like — and must never know WHEN it gets
+        # asked: the thing that wakes up at ten reads presence, writes deliveries
+        # and has a timezone database behind it, none of which may be on the
+        # import path of a runner with no schedule at all.
+        "jarvis.schedule",
     ),
     # A channel reaches Claude Code through rows in ``requests`` and nothing
     # else. Importing the desk would make it unable to run on a headless box,
@@ -62,6 +74,10 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.audio",
         "jarvis.live",
         "jarvis.github",
+        # And it does not decide WHEN it is asked anything. The scheduler
+        # writes the delivery rows this channel picks up; a channel that
+        # could import it could brief the user on itself.
+        "jarvis.schedule",
     ),
     "jarvis/capture": (
         "jarvis.cc",
@@ -69,6 +85,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.audio",
         "jarvis.live",
         "jarvis.github",
+        "jarvis.schedule",
     ),
     # An outward PROVIDER adapter: it reaches GitHub over HTTPS and knows the
     # spine's vocabulary (jarvis.effects owns the promise words its spoken line is
@@ -88,6 +105,11 @@ RULES: dict[str, tuple[str, ...]] = {
         # to create a repository; whether one should be created, what it is called
         # and which job it belongs to are decisions it must never be able to read.
         "jarvis.project",
+        # Same direction, same reason: the briefing reads issues THROUGH this
+        # client. A client that could import the briefing would be able to decide
+        # what is worth saying at ten in the morning.
+        "jarvis.briefing",
+        "jarvis.schedule",
     ),
     # THE PROJECT LIFECYCLE: above the github client, below everything that
     # speaks. It raises `requests` rows, writes `effects` and `outbox` rows and
@@ -104,17 +126,63 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.live",
         "jarvis.telegram",
         "jarvis.capture",
+        "jarvis.schedule",
+    ),
+    # A BRIEFING DOES NOT KNOW HOW IT IS DELIVERED. That is the whole point of
+    # the stage: a section is a row in `requests`, and which channel says it is
+    # decided by presence and the router, hours later, in another process. An
+    # import of the desk here would mean the briefing could only ever be spoken;
+    # an import of Telegram, only ever tapped; and stage 6's phone would be a
+    # rewrite rather than one more channel reading the same rows. It may reach
+    # DOWN to the spine and to the GitHub client, and nowhere else.
+    "jarvis/briefing": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.capture",
+    ),
+    # THE SCHEDULER NEVER SPEAKS AND NEVER DIALS. It knows the spine, it asks
+    # presence where the user is, and it writes `deliveries` rows naming a
+    # channel as a STRING. That is the whole of stage 6's "the phone is one more
+    # channel" claim: an import of Telegram here would mean the morning briefing
+    # could only ever be tapped, and an import of the desk would mean it could
+    # only ever be spoken. It must not know what a briefing CONTAINS either —
+    # the gate publishes `briefing.started` and stops — so `jarvis.briefing` is
+    # on the list, and the dependency between the two stage-5 halves points that
+    # way round: the briefing may read the schedule, never the reverse.
+    "jarvis/schedule": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.capture",
+        "jarvis.github",
+        "jarvis.project",
+        "jarvis.briefing",
     ),
     # The desk speaks and listens. Which channel is attached is not its business,
     # and the driver is a process it talks to through the database.
-    "jarvis/voice": ("jarvis.cc", "jarvis.telegram", "jarvis.github"),
-    "jarvis/audio": ("jarvis.cc", "jarvis.telegram", "jarvis.github"),
+    "jarvis/voice": ("jarvis.cc", "jarvis.telegram", "jarvis.github", "jarvis.schedule"),
+    "jarvis/audio": ("jarvis.cc", "jarvis.telegram", "jarvis.github", "jarvis.schedule"),
     # The other half of the same seam, and the half the answer-shape move was
     # about: the driver NEVER SPEAKS and does not know which channel is attached.
     # Without this the guard is one-directional — it would have caught the voice
     # layer importing the driver while saying nothing about the driver importing
     # an audio device, and the second is what makes the phone stage a rewrite.
-    "jarvis/cc": ("jarvis.voice", "jarvis.audio", "jarvis.live", "jarvis.telegram"),
+    # `jarvis.briefing` joins that list for the same reason: the driver is asked
+    # questions, it never composes them, and a driver that imported the briefing
+    # would be a driver that needs a GitHub client to start.
+    "jarvis/cc": (
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.briefing",
+        "jarvis.schedule",
+    ),
 }
 
 #: The one key in RULES that is not a directory. Named so the key and the lookup
