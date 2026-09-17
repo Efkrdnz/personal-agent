@@ -121,13 +121,36 @@ for your briefing?" on your phone.
 **What does not work yet, so that nobody demonstrates it by accident.** Every one of these is a missing
 caller between two processes, not a missing feature:
 
-- **Nothing consumes the `repo_setup` row.** You will say the sentence, hear "I'll read the requirements
-  back to you", and nothing ever will.
 - **Tapping "Now" on the briefing gate composes no briefing.**
   The gate publishes an event nothing listens for.
 - **There is no wake word**: the desk listens from the moment it starts.
 
-## Driving Claude Code today
+## Speaking a project into existence
+
+```bash
+python -m jarvis build        # carries every spoken build request forward one step
+```
+
+Say "let's build an app that watches my YouTube comments, and no Docker" to the desk (or file the same
+request any other way) and `build` tidies your words into a numbered list, reads it back, and waits. It
+never adds a requirement you did not state: every line carries a span copied out of your own words, and
+anything the tidier invented is thrown away and **said out loud** ("I threw away 'add authentication'
+because I couldn't trace it back to your own words").
+
+Answer it from anywhere — `python -m jarvis pending`, or the buttons on Telegram:
+
+- **Build it** → the repository is created first, cloned, and Claude Code starts inside it.
+- **drop three** / **two should say Postgres** / **add: no Docker** → the list is edited and read back
+  again. Positions that do not exist are refused rather than guessed at.
+
+With no `github_token` it builds in a local directory instead and tells you there is no repository.
+Claude Code receives both the confirmed list AND your unedited words as an appendix, so drift in the
+tidier cannot lose a constraint.
+
+Run `python -m jarvis build` again after each answer; it advances one step per call, so the state it is
+waiting in is always visible rather than hidden inside a blocking loop.
+
+## Driving Claude Code directly
 
 This part works, end to end, and is the reason to install it now:
 

@@ -147,8 +147,11 @@ here. Each gap below is one missing caller:
   stealing a snoozed briefing gate. **The scheduler must be running for Telegram to get questions.**
 - ~~**No command creates a `claude_code` job.**~~ **CLOSED.** `python -m jarvis run "..."`, plus `pending`
   and `answer` to see and settle questions from a terminal. Verified live end to end against the real CLI.
-- **Nothing consumes `repo_setup`.** `code_build` files the row; nothing tidies it, reads it back or creates
-  a repository. `project.requested` is published and has zero readers.
+- ~~**Nothing consumes `repo_setup`.**~~ **CLOSED.** `jarvis/project/runner.py` is the state machine:
+  tidy the transcript, read the list back as a `readback` request any channel can present, apply spoken
+  edits ("drop three"), then create the repository, clone it, and hand stage 2 a `claude_code` job with a
+  cwd. `python -m jarvis build` drives it one step at a time. With no GitHub token it builds LOCALLY and
+  says so, because R2's order is "the repository before the code", not "refuse to work without one".
 - **Nothing consumes `briefing.started`.** `jarvis/schedule/gate.py` publishes it, `jarvis/briefing/` has no
   importer outside its own directory, and `navigator.begin()` has no caller. Worse, that event kind is
   published from TWO places with incompatible payloads.

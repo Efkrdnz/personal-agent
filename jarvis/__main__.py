@@ -16,6 +16,7 @@ The commands, in the order somebody new to the machine needs them:
     python -m jarvis status         what is running, as text
     python -m jarvis tools          the tool surface, per channel
     python -m jarvis run "..."      start a build and drive Claude Code
+    python -m jarvis build          carry every spoken build request forward a step
     python -m jarvis pending        the questions waiting on you, numbered
     python -m jarvis answer 1 2     answer one, by the numbers you were read
     python -m jarvis desk           listen, talk, and drive Claude Code
@@ -327,6 +328,11 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
     cc_why = "" if claude_cli_path() else "no claude CLI (pip install -e '.[cc]')"
     verdict(not cc_why, "python -m jarvis.cc", cc_why)
     verdict(not cc_why, "python -m jarvis run", cc_why)
+    build_why = "" if have.get("gemini_api_key") else "no gemini_api_key (it tidies your words)"
+    r.add(
+        OK if not build_why else WARN,
+        f"{'python -m jarvis build':<28} {'' if not build_why else '— ' + build_why}",
+    )
     r.add(OK, f"{'python -m jarvis pending/answer':<28} — see and settle open questions")
 
     tg_why = "" if have.get("telegram_bot_token") else "no telegram_bot_token (feature off)"
@@ -705,6 +711,100 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+# ───────────────────────────── build ─────────────────────────────
+
+
+def _builder(args: argparse.Namespace, cfg: cfgmod.Config):
+    """Assemble the runner's Deps from this install's credentials. Wiring only.
+
+    Every decision here belongs to somebody else: which model tidies is
+    :mod:`jarvis.live.text`, what the matrix says is
+    :mod:`jarvis.github.scopes`, and what to do with either is
+    :mod:`jarvis.project.runner`. This function's whole job is that the runner
+    never has to go looking for a credential.
+    """
+    from jarvis import spec
+    from jarvis.github import scopes
+    from jarvis.github.transport import HttpTransport
+    from jarvis.live.text import GeminiText
+    from jarvis.project.runner import Deps
+    from jarvis.project.workspace import SubprocessGit
+
+    token = secrets.get("github_token")
+    transport = HttpTransport(token=token) if token else None
+    if transport is not None:
+        caps = scopes.capabilities(transport)
+    else:
+        # 'no' rather than 'unknown': with no credential at all there is nothing
+        # to be uncertain about, and `unknown` would let the runner try and fail
+        # halfway through instead of saying so before it starts.
+        caps = scopes.Capabilities(
+            token_kind="unknown",
+            create="no",
+            source="no github_token is set",
+            notes=("no GitHub credential; builds run locally",),
+        )
+    return Deps(
+        model_call=GeminiText(
+            api_key=secrets.require("gemini_api_key"), response_schema=spec.RESPONSE_SCHEMA
+        ),
+        git=SubprocessGit(),
+        git_token=token,
+        capabilities=caps,
+        owner=cfg.desk.github_owner,
+        workspace_root=cfg.workspace_path,
+        transport=transport,
+        actor="builder",
+    )
+
+
+def cmd_build(args: argparse.Namespace) -> int:
+    """Carry every spoken build request forward one step, and say where each got to.
+
+    One step, not a loop to completion: the interesting states are the ones where
+    it is WAITING on a human, and a command that blocked until the whole build
+    finished would hide the question it is waiting on.
+    """
+    from jarvis.project import runner
+
+    con = db.open_db(args.db)
+    try:
+        cfg = cfgmod.load(args.config)
+        pending_jobs = [
+            j
+            for state in ("queued", "deferred", "blocked", "parked")
+            for j in jobs.list_by_state(con, state)
+            if j.kind == runner.BUILD_JOB_KIND
+        ]
+        if not pending_jobs:
+            print("no build requests. Say one to the desk, or `python -m jarvis run` directly.")
+            return 0
+        try:
+            deps = _builder(args, cfg)
+        except secrets.MissingSecret as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+
+        for job in pending_jobs:
+            if job.state == "parked":
+                # A parked build stopped for a reason that was said out loud.
+                # Re-queue it explicitly rather than retrying on every sweep.
+                if not args.retry:
+                    print(f"{job.id}  parked: {job.stop_reason}  (--retry to try again)")
+                    continue
+                jobs.set_state(con, job.id, "queued", actor="cli")
+            step = runner.advance(con, job.id, deps)
+            print(f"\n{job.id}  {step.action}")
+            print(step.spoken)
+            if step.request_id:
+                print("\n  answer with:  python -m jarvis pending  /  python -m jarvis answer")
+            if step.child_job_id:
+                print(f"  now run:  python -m jarvis run --resume   (job {step.child_job_id})")
+    finally:
+        con.close()
+    return 0
+
+
 # ───────────────────────────── desk ─────────────────────────────
 
 
@@ -964,6 +1064,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     r.add_argument("--resume", action="store_true", help="pick up every job parked on an answer")
     r.set_defaults(fn=cmd_run)
+
+    b = sub.add_parser("build", help="carry every spoken build request forward a step")
+    b.add_argument("--retry", action="store_true", help="re-queue builds that parked")
+    b.set_defaults(fn=cmd_build)
 
     sub.add_parser("pending", help="the questions waiting on you, numbered").set_defaults(
         fn=cmd_pending

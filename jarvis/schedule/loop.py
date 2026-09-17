@@ -71,10 +71,16 @@ __all__ = [
 #: minutes". So this sweep names what it owns, and a kind that is not here is
 #: somebody else's to deliver.
 #:
-#: GROWS ONE KIND AT A TIME, as each raiser gets a runner. When the project
-#: builder lands, its read-back kind joins this tuple and the test below is what
-#: notices if it does not.
-ROUTABLE_KINDS: frozenset[str] = frozenset({"plan_question", "exit_plan", "tool_permission"})
+#: GROWS ONE KIND AT A TIME, as each raiser gets a runner.
+#:
+#: ``readback``, ``confirm_effect`` and ``free_text`` are the project builder's
+#: three questions — "is this the list?", "shall I create it?", "what should I
+#: call it instead?". ``free_text`` is also the kind a completion notice borrows,
+#: and ``notify_finished`` already delivers those; routing one again is a no-op,
+#: because ``schedule_delivery`` is idempotent per (request, channel, attempt).
+ROUTABLE_KINDS: frozenset[str] = frozenset(
+    {"plan_question", "exit_plan", "tool_permission", "readback", "confirm_effect", "free_text"}
+)
 
 #: Where "which finished jobs have already been told to the user" lives. The
 #: cursors table is the shared key-value store migration 001 names; this is one

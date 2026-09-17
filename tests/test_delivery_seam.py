@@ -217,3 +217,72 @@ def test_one_bad_row_does_not_cost_the_other_four_sweeps(
     monkeypatch.setattr(loop, "deliver", boom)
     report = loop.tick(con, actor="scheduler")
     assert report.routed[0].skipped == "OperationalError"
+
+
+# ───────────────────── R3, end to end, through the real channel ─────────────────────
+
+
+def test_a_claude_code_question_now_reaches_telegram_and_can_be_answered(
+    con: sqlite3.Connection,
+) -> None:
+    """THE STAGE-3 CLAIM, which was false for a release: reach me when plan mode asks.
+
+    Driver raises -> scheduler routes -> Telegram presents -> the user taps ->
+    the request is answered. Every step is the real code; only the HTTP transport
+    is fake, which is what makes the channel a function of rows rather than of a
+    live chat. Before the routing sweep existed this stopped dead at step two and
+    nothing anywhere was an error.
+    """
+    from jarvis.telegram.channel import TelegramChannel
+    from jarvis.telegram.transport import FakeTransport
+
+    job = a_blocked_job(con)
+    req = ask(con, job.id)
+    assert rungs(con, req.id) == []
+
+    loop.tick(con, actor="scheduler")
+    assert rungs(con, req.id) == ["desk", "telegram"]
+
+    transport = FakeTransport()
+    channel = TelegramChannel(chat_id=4242)
+    # Past the telegram rung's 90-second escalation: the desk rung is first and
+    # immediate, and nothing claims it, which is the remaining hole (no desk
+    # presenter yet). Telegram is what actually reaches the user today.
+    later = jobs.shift_ts(now(), 120)
+    assert channel.claim_and_present(con, transport, now_ts=later) == [req.id]
+
+    sent = transport.last("sendMessage")
+    assert sent is not None
+    assert "How should todos be stored?" in sent.params["text"]
+    buttons = [b for row in sent.params["reply_markup"]["inline_keyboard"] for b in row]
+    assert [b["text"] for b in buttons][:2] == ["1. SQLite", "2. JSON file"]
+
+    channel.on_callback(
+        con,
+        transport,
+        {
+            "id": "cb1",
+            "data": buttons[0]["callback_data"],
+            "message": {"message_id": 1, "chat": {"id": 4242}},
+        },
+    )
+    fresh = rq.get_request(con, req.id)
+    assert fresh is not None
+    assert fresh.state == "answered"
+    assert fresh.answer == {
+        "answers": {"How should todos be stored?": "SQLite"},
+        "sources": {"How should todos be stored?": "option"},
+    }
+
+
+def test_without_the_sweep_telegram_has_nothing_to_present(con: sqlite3.Connection) -> None:
+    """The negative half, so the test above cannot pass for the wrong reason."""
+    from jarvis.telegram.channel import TelegramChannel
+    from jarvis.telegram.transport import FakeTransport
+
+    job = a_blocked_job(con)
+    ask(con, job.id)
+    transport = FakeTransport()
+    later = jobs.shift_ts(now(), 120)
+    assert TelegramChannel(chat_id=4242).claim_and_present(con, transport, now_ts=later) == []
+    assert transport.sent("sendMessage") == []

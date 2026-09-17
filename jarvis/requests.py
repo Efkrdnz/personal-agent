@@ -70,6 +70,7 @@ __all__ = [
     "mark_presented",
     "next_attempt",
     "open_requests",
+    "requests_for_job",
     "schedule_delivery",
     "supersede_request",
 ]
@@ -586,6 +587,30 @@ def supersede_request(con: sqlite3.Connection, request_id: str) -> bool:
 def get_request(con: sqlite3.Connection, request_id: str) -> Request | None:
     row = con.execute("SELECT * FROM requests WHERE id=?", (request_id,)).fetchone()
     return _to_request(row) if row is not None else None
+
+
+def requests_for_job(
+    con: sqlite3.Connection, job_id: str, *, kind: str | None = None, limit: int = 50
+) -> list[Request]:
+    """Every request this job ever raised, NEWEST FIRST, whatever its state.
+
+    Distinct from :func:`open_requests`, which is "what is waiting on a human".
+    This is "what was agreed", and it is how a multi-step runner picks up after a
+    restart: the answered row it acted on is the only record of what the user
+    said yes to, and it is settled by then, so an open-only query cannot see it.
+
+    Tie-broken on ``rowid``, not on the id: two rows written in the same
+    millisecond would otherwise come back in an order that depends on a random
+    identifier, which is a flake that reproduces one run in three.
+    """
+    sql = "SELECT * FROM requests WHERE job_id=?"
+    args: list[Any] = [job_id]
+    if kind is not None:
+        sql += " AND kind=?"
+        args.append(kind)
+    sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+    args.append(limit)
+    return [_to_request(r) for r in con.execute(sql, tuple(args)).fetchall()]
 
 
 def open_requests(con: sqlite3.Connection, job_id: str | None = None) -> list[Request]:
