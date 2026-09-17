@@ -83,6 +83,8 @@ Full versions in [`CONTRIBUTING.md`](CONTRIBUTING.md). The short form:
    must import under `python -S`. `jarvis/cc/` and the voice layer add their own deps behind extras.
 5. **Comments say why, never what.**
 6. **`jarvis/migrations/*.sql` is frozen.** Add a new numbered migration; never edit an applied one.
+7. **There is exactly one composition root**, `jarvis/__main__.py`, and it holds wiring and no decisions.
+   `tools/check_layers.py` exempts that one path by name and a test asserts the set has one element.
 
 ## Layout
 
@@ -95,11 +97,28 @@ jarvis/           the spine — one SQLite file, several processes, stdlib only
   effects.py      undo as three honest classes, decided before execution
   presence.py     can I be heard if I speak into this room?
   ledger.py       three providers whose units do not reconcile
+  secrets.py      keyring first, environment second, a file never
+  config.py       settings that are not secrets, and a refusal if one appears
+jarvis/tools/     what a spoken sentence is allowed to make happen
 jarvis/cc/        the Claude Code driver — its own OS process, never speaks
+jarvis/__main__.py  THE composition root. The one file allowed to know every layer
 spikes/           experiments with recorded results; they stay runnable
 tools/            CI guards and probes
 docs/             findings, architecture, roadmap, ADRs
 ```
+
+## Running it
+
+```bash
+python -m jarvis doctor            # what is missing, and the command that fixes it
+python -m jarvis secrets set gemini_api_key
+python -m jarvis config init
+python -m jarvis desk              # listen, talk, drive Claude Code
+```
+
+`doctor` is the front door. A voice assistant fails at startup with no screen and no log anybody will
+find, so the whole of "why won't it start" is one command. [`docs/setup.md`](docs/setup.md) is the same
+thing in prose, for the parts that happen in a browser.
 
 ## Two falsifiable tests
 
@@ -113,5 +132,13 @@ If either fails, the seam did not hold — fix the seam rather than working arou
 
 ## Where things stand
 
-Stage 0 (spikes) and the stage-1 spine are done. See [`docs/roadmap.md`](docs/roadmap.md) for what is next
-and what was deliberately cut.
+Stages 0–5 are built, 1,982 tests pass, and `python -m jarvis doctor` will tell you what a given machine is
+still missing. What is NOT yet wired, stated plainly so nobody demos it by accident:
+
+- **A `repo_setup` job has no runner.** `code_build` files the row; the process that tidies the transcript,
+  reads the list back and creates the repository is the next piece of work. Every part it needs exists and
+  is tested (`jarvis.spec`, `jarvis.project.lifecycle`, `jarvis.voice.router`); nothing composes them yet.
+- **The desk has no wake word and no answer tool.** `python -m jarvis desk` opens the microphone and the
+  Live session, and `DESK.tools` still names four tools that do not exist — `doctor` prints exactly which.
+
+See [`docs/roadmap.md`](docs/roadmap.md) for what is next and what was deliberately cut.

@@ -243,7 +243,16 @@ DESK = SessionProfile(
         "Long work happens in other processes. Tools return a handle at once; say what you",
         "started, not what you finished.",
     ),
-    tools=("answer_question", "explain_option", "reread_options", "code_build", "job_control"),
+    tools=(
+        "answer_question",
+        "explain_option",
+        "reread_options",
+        "code_build",
+        "job_control",
+        "project_status",
+        "spend",
+        "reachability",
+    ),
 )
 
 PHONE_USER = SessionProfile(
@@ -255,7 +264,15 @@ PHONE_USER = SessionProfile(
         "Confirm anything consequential by having the user say the number back.",
     ),
     detectors=frozenset({"nav", "vad", "uplink"}),
-    tools=("answer_question", "explain_option", "reread_options", "job_control"),
+    tools=(
+        "answer_question",
+        "explain_option",
+        "reread_options",
+        "job_control",
+        "project_status",
+        "spend",
+        "reachability",
+    ),
 )
 
 AGENT_CALL = SessionProfile(

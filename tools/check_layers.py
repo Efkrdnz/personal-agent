@@ -32,7 +32,14 @@ import ast
 import sys
 from pathlib import Path
 
-__all__ = ["RULES", "imports_of", "modules_of", "violations"]
+__all__ = [
+    "COMPOSITION_ROOTS",
+    "RULES",
+    "imports_of",
+    "is_composition_root",
+    "modules_of",
+    "violations",
+]
 
 #: Layer -> the module prefixes it must never import. Keys are repo-relative
 #: directories, except "spine", which is the top-level ``jarvis/*.py`` modules.
@@ -163,6 +170,22 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.project",
         "jarvis.briefing",
     ),
+    # THE TOOL SURFACE: what a spoken sentence is allowed to make happen. It sits
+    # ABOVE the lifecycle and BELOW everything that has a microphone or a socket,
+    # and the forbidden list is the whole of "the phone is one more channel":
+    # a tool that could import the voice layer would be a tool that works at the
+    # desk and nowhere else, and a tool that could import `jarvis.cc` would put
+    # the Claude Code driver on the import path of the Telegram bot. What a tool
+    # knows about who called it is `ctx.channel`, a STRING, and the capability it
+    # implies is the `channels` column on the tool — not an import it could use
+    # to render something itself.
+    "jarvis/tools": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+    ),
     # The desk speaks and listens. Which channel is attached is not its business,
     # and the driver is a process it talks to through the database.
     "jarvis/voice": ("jarvis.cc", "jarvis.telegram", "jarvis.github", "jarvis.schedule"),
@@ -189,17 +212,37 @@ RULES: dict[str, tuple[str, ...]] = {
 #: cannot drift, which would silently turn the spine's rule into an empty glob.
 SPINE = "spine"
 
+#: The files that are ALLOWED to know every layer, because knowing every layer is
+#: their entire job: a composition root wires the sound card to the Live session
+#: to the tool registry to the database and then gets out of the way.
+#:
+#: This is a hole in the rule above and it is kept honest by being a LIST rather
+#: than a pattern. ``jarvis/*/__main__.py`` as a glob would quietly exempt every
+#: entry point somebody adds later, including the ones that should obey the
+#: seams; an explicit path means a second exemption is a line in a diff that a
+#: reviewer has to agree with. ``tests/test_layers.py`` asserts the exact set,
+#: so adding one without meaning to fails the suite.
+#:
+#: The rule a composition root still obeys, which no checker can enforce: it
+#: contains WIRING and no decisions. Anything here worth a unit test belongs in
+#: a layer that has one.
+COMPOSITION_ROOTS: frozenset[str] = frozenset({"jarvis/__main__.py"})
+
 
 def _root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
 def modules_of(layer: str, root: Path | None = None) -> list[Path]:
-    """The source files belonging to one layer, sorted."""
+    """The source files belonging to one layer, sorted. Composition roots excluded."""
     base = (root or _root()).resolve()
-    if layer == SPINE:
-        return sorted((base / "jarvis").glob("*.py"))
-    return sorted((base / layer).rglob("*.py"))
+    found = (base / "jarvis").glob("*.py") if layer == SPINE else (base / layer).rglob("*.py")
+    return sorted(p for p in found if not is_composition_root(p, base))
+
+
+def is_composition_root(path: Path, root: Path | None = None) -> bool:
+    base = (root or _root()).resolve()
+    return path.resolve().relative_to(base).as_posix() in COMPOSITION_ROOTS
 
 
 def imports_of(path: Path, root: Path | None = None) -> set[str]:
@@ -264,7 +307,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"ok: {len(RULES)} layers, no backwards imports")
+    roots = ", ".join(sorted(COMPOSITION_ROOTS))
+    print(f"ok: {len(RULES)} layers, no backwards imports (composition roots: {roots})")
     return 0
 
 

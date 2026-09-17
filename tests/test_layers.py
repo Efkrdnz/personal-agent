@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from tools.check_layers import (  # noqa: E402 - the repo root is not on sys.path at import time
+    COMPOSITION_ROOTS,
     RULES,
     imports_of,
     modules_of,
@@ -218,3 +219,64 @@ def test_nothing_below_the_briefing_imports_it() -> None:
             if name == "jarvis.briefing" or name.startswith("jarvis.briefing.")
         ]
         assert not reached, "\n".join(reached)
+
+
+def test_the_tool_surface_knows_nothing_about_who_called_it() -> None:
+    """A tool is dispatched from the desk, from Telegram and from a phone call.
+
+    So it may not import any of them, nor the driver, nor a sound card: what it
+    knows about its caller is ``ctx.channel``, a string, and the capability that
+    implies is the ``channels`` column on the tool. An import of the voice layer
+    here would be a tool that works at the desk and nowhere else — the exact
+    shape of the reference build's ``ctx["player"]``.
+    """
+    reached = [
+        f"{path.relative_to(ROOT).as_posix()} imports {name}"
+        for path in modules_of("jarvis/tools", ROOT)
+        for name in sorted(imports_of(path, ROOT))
+        if name.startswith(
+            ("jarvis.cc", "jarvis.voice", "jarvis.audio", "jarvis.live", "jarvis.telegram")
+        )
+    ]
+    assert not reached, "\n".join(reached)
+
+    # And it DOES reach down, so the rule is not passing vacuously.
+    imported = {
+        name for path in modules_of("jarvis/tools", ROOT) for name in imports_of(path, ROOT)
+    }
+    assert "jarvis.jobs" in imported
+    assert any(n.startswith("jarvis.project") for n in imported)
+
+
+def test_nothing_below_the_tool_surface_imports_it() -> None:
+    for layer in ("spine", "jarvis/github", "jarvis/project", "jarvis/cc"):
+        reached = [
+            f"{path.relative_to(ROOT).as_posix()} imports {name}"
+            for path in modules_of(layer, ROOT)
+            for name in sorted(imports_of(path, ROOT))
+            if name == "jarvis.tools" or name.startswith("jarvis.tools.")
+        ]
+        assert not reached, "\n".join(reached)
+
+
+def test_there_is_exactly_one_composition_root() -> None:
+    """The exemption is a hole in the guard, so the hole has a fixed size.
+
+    A composition root is allowed to import every layer because wiring them
+    together is its whole job. That is only safe while there is ONE of them and
+    it contains no decisions — so adding a second is a change to this line, in a
+    diff somebody has to agree with, rather than a file that quietly appears.
+    """
+    assert sorted(COMPOSITION_ROOTS) == ["jarvis/__main__.py"]
+
+
+def test_the_composition_root_is_not_checked_as_spine() -> None:
+    """The exemption actually applies: the desk app is not in the spine's file list."""
+    root = ROOT / "jarvis/__main__.py"
+    if not root.exists():  # pragma: no cover - it does
+        pytest.skip("no composition root yet")
+    assert root not in modules_of("spine", ROOT)
+    # ...and it really does import things the spine may not, so the exemption is
+    # load-bearing rather than decorative.
+    names = imports_of(root, ROOT)
+    assert any(n.startswith(("jarvis.live", "jarvis.audio", "jarvis.voice")) for n in names)

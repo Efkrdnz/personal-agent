@@ -25,6 +25,11 @@ aec = ["pywebrtc-audio>=0.2"]
 # below 3.0.0.
 live = ["google-genai>=2.23,<3"]
 tts = ["edge-tts>=7"]
+# The OS keyring. Optional at import time and imported INSIDE the functions that
+# use it (jarvis/secrets.py), because every process opens that module and the
+# spine has to keep importing under `python -S`. Without it, credentials come
+# from the environment and `doctor` says so.
+secrets = ["keyring>=25"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
 
 [build-system]
