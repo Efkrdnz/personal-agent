@@ -762,9 +762,11 @@ def cmd_answer(args: argparse.Namespace) -> int:
             return 0
         print(f"answered: {req.short_label}")
         job = jobs.get(con, req.job_id) if req.job_id else None
-        if job and job.state in ("deferred", "blocked"):
-            # Whatever raised this is not sitting on the row any more. Without
-            # this line the user answers and nothing ever happens.
+        if job and job.state == "deferred":
+            # DEFERRED only. `blocked` means a runner IS sitting on this row and
+            # polling — it picks the answer up by itself within a second, and
+            # telling the user to resume it would be an instruction to do
+            # nothing, printed at the moment they most want to believe one.
             print(f"that job is parked — pick it up with:  {resume_command(job)}")
     finally:
         con.close()

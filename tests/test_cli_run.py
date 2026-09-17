@@ -432,3 +432,32 @@ def test_a_child_that_refuses_at_startup_leaves_a_visible_row(
     job = only_job(dbpath)
     assert job.state == "parked", "a queued row is invisible to every process in the system"
     assert "exited 2" in (job.stop_reason or "")
+
+
+def test_answering_a_job_whose_runner_is_still_polling_says_nothing_about_resuming(
+    dbpath: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`blocked` means a runner IS sitting on the row and will pick the answer up.
+
+    Telling the user to resume it is an instruction to do nothing, printed at the
+    moment they most want to believe one. Only `deferred` — the driver exited —
+    needs the hint.
+    """
+    con = connect(dbpath)
+    try:
+        job = jobs.create_job(con, kind="claude_code", title="t", created_by="cli")
+        jobs.set_state(con, job.id, "starting", actor="t")
+        jobs.set_state(con, job.id, "running", actor="t")
+    finally:
+        con.close()
+    req = a_question(dbpath, job.id)
+    con = connect(dbpath)
+    try:
+        jobs.mark_blocked(con, job.id, req.id, actor="t")  # blocked, not deferred
+    finally:
+        con.close()
+
+    assert run_cli(["answer", req.id, "1"], dbpath) == 0
+    out = capsys.readouterr().out
+    assert "resume" not in out
+    assert "parked" not in out
