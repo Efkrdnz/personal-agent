@@ -225,3 +225,32 @@ def test_every_subcommand_has_a_handler() -> None:
     for command in ("doctor", "secrets", "config", "status", "tools", "desk"):
         argv = [command, "list"] if command == "secrets" else [command]
         assert callable(parser.parse_args(argv).fn), command
+
+
+def test_the_desk_listens_for_event_kinds_that_actually_exist() -> None:
+    """A kind the session never emits is a branch that never fires, silently.
+
+    Both sides of this seam are strings, nothing validates them, and the first
+    draft listened for "reconnect" and "tool_error" — neither of which
+    ``LiveSession`` has ever emitted. The terminal simply stayed quiet, which is
+    indistinguishable from "nothing happened".
+    """
+    import ast
+    from pathlib import Path
+
+    import jarvis.live.session as live
+
+    tree = ast.parse(Path(live.__file__).read_text(encoding="utf-8"))
+    emitted = {
+        node.args[0].value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "_emit"
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    }
+    assert "input_transcript" in emitted, "the audit found the emitter, not this test's parser"
+    unknown = sorted(set(cli.DESK_EVENTS) - emitted)
+    assert not unknown, f"the desk listens for kinds nothing emits: {unknown}"

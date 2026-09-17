@@ -500,6 +500,26 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
     return leg, graph, session
 
 
+#: The session event kinds worth a line on the terminal. Taken from the
+#: ``_emit`` calls in :mod:`jarvis.live.session` and asserted against them by a
+#: test, because a kind that does not exist is a branch that never fires and
+#: nothing anywhere is an error — the first draft of this listened for
+#: "reconnect" and "tool_error", neither of which the session has ever emitted.
+DESK_EVENTS: tuple[str, ...] = (
+    "connected",
+    "connect_failed",
+    "disconnected",
+    "go_away",
+    "revoked",
+    "stream_error",
+    "uplink_error",
+    "tool_call",
+    "tool_failed",
+    "tool_denied",
+    "tool_unroutable",
+)
+
+
 def _desk_event_printer(transcript: Any) -> Any:
     """Feed the transcript, and put one line per event on the terminal.
 
@@ -514,7 +534,7 @@ def _desk_event_printer(transcript: Any) -> Any:
             print(f"  you: {event.detail.get('text', '')}")
         elif event.kind == "output_transcript":
             print(f"jarvis: {event.detail.get('text', '')}")
-        elif event.kind in ("connected", "reconnect", "go_away", "tool_error"):
+        elif event.kind in DESK_EVENTS:
             print(f"[{event.kind}] {event.detail}")
 
     return on_event
