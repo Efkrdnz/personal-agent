@@ -108,13 +108,31 @@ python -m jarvis status      # what is running, what it cost, where it thinks yo
 python -m jarvis desk        # listen and talk
 ```
 
-**What works today.** `desk` opens your microphone, holds a conversation, and files a build request from
-your own words — `code_build` writes one `repo_setup` job row carrying the transcript, the model and the
-effort level, all three parsed from what you actually said rather than from the model's summary of it.
-`project_status`, `spend` and `reachability` answer for themselves.
+`doctor` ends with a **what you can run** list — a verdict per process, with its blocker named. Read that
+rather than this paragraph; it is generated from your machine and this is generated from memory.
 
-**What does not work yet, so that nobody demonstrates it by accident.** Nothing consumes that
-`repo_setup` row. The tidier, the spoken read-back and the repository creation all exist and are tested
-([`jarvis/spec.py`](../jarvis/spec.py), [`jarvis/project/lifecycle.py`](../jarvis/project/lifecycle.py)),
-but no process composes them, so the row sits there until one does. There is also no wake word yet: the
-desk listens from the moment it starts.
+**What works today.** `desk` opens your microphone, holds a spoken conversation, and files a build request
+from your own words: `code_build` writes one `repo_setup` job row carrying the transcript, the model and the
+effort level, all three parsed from what you actually said rather than from the model's summary of it.
+`project_status`, `spend` and `reachability` answer for themselves. `python -m jarvis.telegram` binds to your
+chat and answers `/status`. `python -m jarvis.schedule` arms the 10am gate and really does put "Good moment
+for your briefing?" on your phone.
+
+**What does not work yet, so that nobody demonstrates it by accident.** Every one of these is a missing
+caller between two processes, not a missing feature:
+
+- **Nothing consumes the `repo_setup` row.** You will say the sentence, hear "I'll read the requirements
+  back to you", and nothing ever will.
+- **A Claude Code plan question reaches no channel.** The driver raises it and blocks; the Telegram bot reads
+  a `deliveries` table that nothing writes for it. `/status` will tell you a question is waiting and there is
+  no way to answer it.
+- **Tapping "Now" on the briefing gate composes no briefing.** The gate publishes an event nothing listens
+  for.
+- **No command creates a Claude Code job.** The driver works, but you would have to write Python to start
+  one — see `spikes/s2_live_slice/run_slice.py` for the shape.
+- **There is no wake word**: the desk listens from the moment it starts.
+
+There is one thing a headset buys you beyond comfort: `select_duplex_device` needs your default input and
+your default output to be **the same device**. A laptop's built-in mic and built-in speakers are two devices
+and two clocks, and it will refuse rather than let the echo canceller silently drift. `doctor` now runs that
+exact check, so it refuses in the same words `desk` would.

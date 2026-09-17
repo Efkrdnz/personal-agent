@@ -102,6 +102,108 @@ def test_a_leg_that_requires_aec_refuses_instead() -> None:
     assert "pywebrtc-audio" in str(exc.value)
 
 
+class FakeStream:
+    """A stream that behaves like PortAudio's: opened stopped, fires only once started.
+
+    The real ``sd.Stream`` calls ``Pa_OpenStream`` in ``__init__`` and
+    ``Pa_StartStream`` only inside ``start()``. A fake that ran the callback
+    regardless would pass the buggy version of :meth:`DeskLeg.open`, which is
+    exactly how this shipped — so the fake refuses to fire until started, and
+    that refusal is the whole point of it.
+    """
+
+    def __init__(self) -> None:
+        self.started = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class Tinfo:
+    inputBufferAdcTime = 0.0  # noqa: N815 - PortAudio's own field names
+    outputBufferDacTime = 0.0  # noqa: N815
+
+
+def open_capturing(leg: DeskLeg, graph: AudioGraph, monkeypatch, stream=None):
+    """Open the leg against a fake device, and hand back (stream, callback)."""
+    made = stream if stream is not None else FakeStream()
+    captured = {}
+
+    def fake_open(selection, callback, *, block=BLOCK, channels=1):
+        captured["callback"] = callback
+        return made
+
+    monkeypatch.setattr("jarvis.audio.legs.open_duplex_stream", fake_open)
+    leg.open(graph)
+    return made, captured["callback"]
+
+
+def drive(callback, graph: AudioGraph, blocks: int, *, started: bool) -> None:
+    """Feed the callback the way PortAudio would — or, when stopped, not at all."""
+    out = np.zeros((BLOCK, 1), np.int16)
+    for _ in range(blocks):
+        if not started:
+            continue  # what a stopped device does: no callback, no sound, no error
+        callback(np.zeros((BLOCK, 1), np.int16), out, BLOCK, Tinfo(), None)
+
+
+def test_the_duplex_stream_is_actually_started(monkeypatch: pytest.MonkeyPatch) -> None:
+    """THE bug that made `python -m jarvis desk` deaf and mute for one release.
+
+    ``open_duplex_stream`` returns an unstarted stream by design — that gap is
+    where the mixer claim goes — and for one release nothing ever closed it.
+    Every other audio test drives ``graph.step`` directly, so the whole suite
+    was green while the only thing that calls it in production, the PortAudio
+    callback, was never armed.
+    """
+    graph = graph_for(DEV_RATE, BLOCK)
+    leg = DeskLeg(probe=FakeProbe([HEADSET], (0, 0)))
+    stream, _ = open_capturing(leg, graph, monkeypatch)
+    assert stream.started, "the device was opened and never started: silence in both directions"
+
+
+def test_an_unstarted_stream_loses_the_microphone_and_the_speaker_at_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The consequence, asserted rather than assumed.
+
+    ``graph.step`` is the only caller of ``mixer.pull``, so a callback that never
+    fires costs capture AND playback — and reports neither, because an assistant
+    that hears nothing sounds exactly like an assistant nobody is talking to.
+    """
+    graph = graph_for(DEV_RATE, BLOCK)
+    leg = DeskLeg(probe=FakeProbe([HEADSET], (0, 0)))
+    _, callback = open_capturing(leg, graph, monkeypatch)
+
+    drive(callback, graph, 5, started=False)
+    assert graph.blocks == 0
+
+    drive(callback, graph, 5, started=True)
+    assert graph.blocks == 5, "a started stream must drive the graph"
+    assert graph.micbus.written > 0, "and the microphone must reach the bus"
+
+
+def test_a_stream_that_will_not_start_releases_the_mixer_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Otherwise the retry reports "something else is already using the speaker"."""
+
+    class WontStart(FakeStream):
+        def start(self) -> None:
+            raise OSError("PortAudio: device unavailable")
+
+    graph = graph_for(DEV_RATE, BLOCK)
+    leg = DeskLeg(probe=FakeProbe([HEADSET], (0, 0)))
+    with pytest.raises(OSError, match="device unavailable"):
+        open_capturing(leg, graph, monkeypatch, stream=WontStart())
+
+    graph.mixer.claim_output("desk-2").release()  # free, so the claim really went back
+
+
 def test_opening_two_desk_legs_on_one_mixer_is_refused_at_the_claim() -> None:
     """Rule 2: the refusal happens BEFORE PortAudio is asked for the device, so a
     second leg fails on a check rather than on a driver error."""

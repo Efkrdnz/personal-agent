@@ -182,41 +182,88 @@ def _check_packages(r: Report) -> None:
             )
 
 
+def claude_cli_path() -> str | None:
+    """The CLI the DRIVER would actually run, which is usually not the one on PATH.
+
+    ``claude-agent-sdk`` ships its own pinned CLI and prefers it; ``shutil.which``
+    is only its fallback. Checking PATH alone gets this wrong in BOTH directions:
+    it reports "missing" on a machine where ``pip install -e '.[cc]'`` is all that
+    is needed, and it reports the version of a binary the driver will never
+    execute. CLAUDE.md pins the measured facts to one CLI build, so which build
+    runs is not a detail.
+    """
+    try:
+        from claude_agent_sdk._internal.transport.subprocess_cli import (
+            SubprocessCLITransport,
+        )
+
+        bundled = SubprocessCLITransport.__new__(SubprocessCLITransport)._find_bundled_cli()
+        if bundled:
+            return str(bundled)
+    except Exception:  # noqa: BLE001 - a private path; PATH is the documented fallback
+        pass
+    return shutil.which("claude")
+
+
 def _check_claude_cli(r: Report) -> None:
     r.section("claude code")
-    exe = shutil.which("claude")
+    exe = claude_cli_path()
     if exe is None:
-        r.add(BAD, "the `claude` CLI is not on PATH — the driver runs it as a subprocess")
+        r.add(BAD, "no `claude` CLI — the SDK bundles one; pip install -e '.[cc]'")
         return
+    bundled = "bundled with the SDK" if "claude_agent_sdk" in exe else "from PATH"
     try:
         out = subprocess.run(  # noqa: S603 - a fixed argv, no shell
             [exe, "--version"], capture_output=True, text=True, timeout=20, check=False
         )
         version = (out.stdout or out.stderr).strip().splitlines()[:1]
-        r.add(OK, f"{exe}  {version[0] if version else '(version unknown)'}")
+        r.add(OK, f"{version[0] if version else '(version unknown)'}  ({bundled})")
+        r.add(OK, f"  {exe}")
     except (OSError, subprocess.SubprocessError) as exc:
         r.add(WARN, f"{exe} would not report a version: {type(exc).__name__}")
 
 
-def _check_audio(r: Report) -> None:
+def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
+    """Run the EXACT selection ``_build_desk`` runs, and report what it says.
+
+    An earlier version of this listed devices and marked a failure only when some
+    were enumerable and none were duplex. That check passes on most of the ways
+    the desk actually refuses — no PortAudio at all, a host with no default
+    device, a laptop whose default input and default output are two different
+    devices (``ClockSplit``), a configured ``input_device`` that matches two
+    devices or none. So ``doctor`` could end with "Everything required is
+    present" on a machine where ``desk`` exits 2 one second later, which is the
+    worst available bug in a command whose entire job is to say "you are ready".
+
+    The fix is not a longer list of conditions to keep in sync — it is calling
+    the same function. Returns (ready, why) for the readiness summary.
+    """
     r.section("audio")
     if not _installed("sounddevice"):
-        r.add(WARN, "sounddevice is not installed, so devices cannot be listed")
-        return
-    try:
-        from jarvis.audio.devices import PortAudioProbe
+        why = "sounddevice is not installed (pip install -e '.[voice]')"
+        r.add(BAD, why)
+        return False, why
+    from jarvis.audio import DEV_RATE
+    from jarvis.audio.devices import DeviceError, PortAudioProbe, select_duplex_device
 
-        found = list(PortAudioProbe().devices())
-    except Exception as exc:  # noqa: BLE001 - no PortAudio, no sound server, no devices
-        r.add(WARN, f"no audio devices readable: {exc}")
-        return
-    duplex = [d for d in found if d.duplex]
-    # Duplex specifically: the desk leg opens ONE stream for both directions so
-    # that the AEC reference is bit-exact with what the speaker played. A box
-    # with a microphone and speakers on two different devices cannot run it.
-    r.add(OK if duplex else BAD, f"{len(found)} device(s), {len(duplex)} full-duplex")
-    for d in duplex[:6]:
-        r.add(OK, f"  [{d.index}] {d.name}  ({d.hostapi}, {d.default_samplerate:.0f} Hz)")
+    probe = PortAudioProbe()
+    try:
+        found = list(probe.devices())
+        r.add(OK, f"{len(found)} device(s), {sum(1 for d in found if d.duplex)} full-duplex")
+        for d in [x for x in found if x.duplex][:6]:
+            r.add(OK, f"  [{d.index}] {d.name}  ({d.hostapi}, {d.default_samplerate:.0f} Hz)")
+    except DeviceError as exc:
+        r.add(BAD, str(exc))
+        return False, str(exc)
+
+    name = cfg.voice.input_device if cfg is not None else None
+    try:
+        selection = select_duplex_device(probe, name=name, samplerate=DEV_RATE)
+    except DeviceError as exc:
+        r.add(BAD, f"{type(exc).__name__}: {exc}")
+        return False, str(exc)
+    r.add(OK, f"desk would use: {selection.name}")
+    return True, ""
 
 
 def _check_tool_surface(r: Report) -> None:
@@ -239,23 +286,72 @@ def _check_tool_surface(r: Report) -> None:
             r.add(WARN, f"  built but never offered on {channel}: {', '.join(unreachable)}")
 
 
+def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: str) -> None:
+    """Per-command readiness, because "ready" is not one fact.
+
+    The earlier version printed a single "Everything required is present", which
+    was wrong in both directions: it failed a headless box that only wanted the
+    Telegram bot, and — worse — it passed machines where ``desk`` exits two
+    seconds later, because the audio check was a warning. A verdict per entry
+    point is the honest shape, and it is also the answer to the question people
+    actually arrive with, which is "what can I run".
+
+    The processes are listed here because nothing else lists them. ``python -m
+    jarvis`` does not own ``jarvis.cc``, ``jarvis.telegram`` or
+    ``jarvis.schedule`` — they are separate daemons — and a front door that does
+    not mention the other three doors is not a front door.
+    """
+    r.section("what you can run")
+    have = {s.secret.name: s.ok for s in secrets.probe()}
+    missing_pkgs = [m for m, _, _, required in EXTRAS if required and not _installed(m)]
+
+    def verdict(ok: bool, cmd: str, why: str) -> None:
+        r.add(OK if ok else BAD, f"{cmd:<28} {'' if ok else '— ' + why}")
+
+    verdict(True, "python -m jarvis status", "")
+    verdict(True, "python -m jarvis tools", "")
+
+    desk_why = ""
+    if missing_pkgs:
+        desk_why = f"missing packages: {', '.join(missing_pkgs)}"
+    elif not have.get("gemini_api_key"):
+        desk_why = "no gemini_api_key"
+    elif not audio_ok:
+        desk_why = audio_why
+    verdict(not desk_why, "python -m jarvis desk", desk_why)
+
+    cc_why = "" if claude_cli_path() else "no claude CLI (pip install -e '.[cc]')"
+    verdict(not cc_why, "python -m jarvis.cc", cc_why)
+    if not cc_why:
+        # Stated because nothing else does: the driver needs a jobs row that no
+        # command in this tree creates, and a user who runs it cold gets exit 4.
+        r.add(WARN, "  ...but no command creates the job row it needs; see docs/setup.md")
+
+    tg_why = "" if have.get("telegram_bot_token") else "no telegram_bot_token (feature off)"
+    tail = "" if not tg_why else f"— {tg_why}"
+    r.add(OK if not tg_why else WARN, f"{'python -m jarvis.telegram':<28} {tail}")
+    r.add(OK, f"{'python -m jarvis.schedule':<28} — arms the 10am briefing gate")
+    del cfg
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     r = Report(lines=[])
     _check_runtime(r)
-    _check_config(r, args.config)
+    cfg = _check_config(r, args.config)
     _check_secrets(r)
     _check_packages(r)
     _check_database(r, args.db)
     _check_claude_cli(r)
-    _check_audio(r)
+    audio_ok, audio_why = _check_audio(r, cfg)
     _check_tool_surface(r)
+    _readiness(r, cfg, audio_ok, audio_why)
 
     print("\n".join(r.lines).strip())
     print()
     if r.blocking:
-        print(f"{r.blocking} thing(s) must be fixed before `python -m jarvis desk` will start.")
+        print(f"{r.blocking} blocking problem(s) above. Each MISSING line names its own fix.")
         return 1
-    print("Everything required is present. `python -m jarvis desk` should start.")
+    print("Nothing blocking. The 'what you can run' list above is what will actually start.")
     return 0
 
 
@@ -417,7 +513,7 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
 
     from jarvis.audio import BLOCK, DEV_RATE, MIC_RATE
     from jarvis.audio.devices import DeviceError
-    from jarvis.audio.dsp import EnergyVad
+    from jarvis.audio.dsp import AecUnavailable, EnergyVad
     from jarvis.audio.graph import AudioGraph, QueuedEventSink
     from jarvis.audio.legs import DeskLeg
     from jarvis.audio.micbus import MicBus
@@ -453,11 +549,23 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
         raise StartupRefused(str(exc)) from exc
     print(f"{OK}  microphone and speaker: {selection.name}")
     turn = TurnController(mixer=mixer, vad=EnergyVad(), uplink=uplink)
+    try:
+        aec = leg.make_aec()
+    except AecUnavailable as exc:
+        # Reached only when the config says assume_headset = false, which is the
+        # user asking for open speakers. That is a refusal with a fix, not a
+        # traceback: AecUnavailable is a plain RuntimeError and nothing above
+        # here would have caught it.
+        raise StartupRefused(
+            f"{exc}\nYou have voice.assume_headset = false, which means open speakers and "
+            "therefore a real echo canceller. Either `pip install -e '.[aec]'`, or set "
+            "assume_headset = true and use a headset."
+        ) from exc
     graph = AudioGraph(
         mixer=mixer,
         micbus=micbus,
         turn=turn,
-        aec=leg.make_aec(),
+        aec=aec,
         device_rate=leg.device_rate,
         block=leg.block,
         on_event=QueuedEventSink(),

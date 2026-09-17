@@ -253,10 +253,22 @@ class DeskLeg:
         return NullNoiseSuppressor(level=1)
 
     def open(self, graph: AudioGraph) -> Any:
-        """Open THE duplex stream and claim the mixer's single output.
+        """Open THE duplex stream, claim the mixer's single output, and START it.
 
         The claim is taken BEFORE the stream exists, so a second leg on the same
         mixer fails here rather than after PortAudio has grabbed the device.
+
+        STARTING IS THIS METHOD'S JOB AND IT SHIPPED WITHOUT IT.
+        :func:`~jarvis.audio.devices.open_duplex_stream` returns an UNSTARTED
+        stream on purpose — that gap is the window in which the mixer claim
+        happens — and for one release nothing in the tree ever closed it. Every
+        unit test drove ``graph.step`` directly, so the whole graph was green
+        while the only thing that calls it in production, the PortAudio
+        callback, was never armed: ``python -m jarvis desk`` printed
+        "listening.", opened a Gemini socket, and sat deaf and mute in both
+        directions, because ``graph.step`` is also the only caller of
+        ``mixer.pull``. Nothing raises, nothing logs, and the failure is
+        SILENCE — which is what an idle assistant sounds like anyway.
         """
         selection = self._selection or self.select()
         self._claim = graph.mixer.claim_output(self.name)
@@ -270,6 +282,14 @@ class DeskLeg:
             outdata[:, 0] = played
 
         self._stream = open_duplex_stream(selection, callback, block=self.block)
+        try:
+            self._stream.start()
+        except Exception:
+            # A started stream owns the device; a half-open one that failed to
+            # start would hold the mixer claim forever and make the next attempt
+            # look like "something else is already using the speaker".
+            self.close()
+            raise
         return self._stream
 
     def close(self) -> None:

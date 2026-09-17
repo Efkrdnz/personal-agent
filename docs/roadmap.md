@@ -19,9 +19,9 @@ Stage 0 and the stage-1 spine are built. What is actually true today, as opposed
 | **Spike S1** | **PASS, run for real.** Cross-process plan-mode answering, and defer → SIGKILL → 180s gap → resume → answer replayed. Cost $0.12. See [`spikes/s0_crossproc/RESULTS.md`](../spikes/s0_crossproc/RESULTS.md). |
 | **Probe S9(c)** | A `can_use_tool` callback survives a 3-minute block (measured). The 90-minute case has a probe: `tools/probe_long_block.py`. |
 | **The spine** | Built: `bus`, `requests`, `jobs`, `reconcile`, `effects`, `presence`, `kill`, `ledger`, `spec`, `answers`, `secrets`, `config`, on `db`/`ids`/`clock`. Stdlib-only, integration-tested across connections. |
-| **Stages 2–5** | Built: the Claude Code driver, the voice layer, Telegram, repo-first project creation, the scheduler and the briefing. **1,982 tests pass.** |
+| **Stages 2–5** | The PARTS are built and tested: the Claude Code driver (proved live against the real CLI), the voice layer, Telegram, repo-first project creation, the scheduler and the briefing. **1,991 tests pass.** |
 | **The front door** | `python -m jarvis doctor / secrets / config / status / tools / desk`. `doctor` names every gap and the command that closes it; [`docs/setup.md`](setup.md) covers the parts that happen in a browser. |
-| **Not yet wired** | Nothing consumes a `repo_setup` row: `code_build` files the build request, and the process that tidies it, reads it back and creates the repository is the next piece. There is no wake word yet either. |
+| **Not yet wired** | **Composition, everywhere.** An audit of all five entry points found four missing CALLERS, each one function: no `deliveries` row is ever written for a Claude Code question (so no channel can answer one), nothing consumes `repo_setup`, nothing consumes `briefing.started`, and nothing reads the event log. Plus: no command creates a `claude_code` job, and there is no wake word. See CLAUDE.md, 'Where things stand'. |
 | **CI guards** | Secret patterns verified against real `git check-ignore`; a smoke alarm for CC BY-NC reference code. |
 
 Three findings from S1 changed the plan and are recorded in `RESULTS.md`: `tool_use_id` is stable across

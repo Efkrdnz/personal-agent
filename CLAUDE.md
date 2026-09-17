@@ -132,13 +132,42 @@ If either fails, the seam did not hold — fix the seam rather than working arou
 
 ## Where things stand
 
-Stages 0–5 are built, 1,982 tests pass, and `python -m jarvis doctor` will tell you what a given machine is
-still missing. What is NOT yet wired, stated plainly so nobody demos it by accident:
+Every stage's PARTS are built and tested. What is missing is almost entirely COMPOSITION: processes that
+read the rows other processes write. An audit of all five entry points found four such gaps, none of which
+any test could have caught, because every one of them is a caller that does not exist.
 
-- **A `repo_setup` job has no runner.** `code_build` files the row; the process that tidies the transcript,
-  reads the list back and creates the repository is the next piece of work. Every part it needs exists and
-  is tested (`jarvis.spec`, `jarvis.project.lifecycle`, `jarvis.voice.router`); nothing composes them yet.
-- **The desk has no wake word and no answer tool.** `python -m jarvis desk` opens the microphone and the
-  Live session, and `DESK.tools` still names four tools that do not exist — `doctor` prints exactly which.
+**NOTHING CONNECTS TWO PROCESSES YET.** This is the single sentence to read before believing anything else
+here. Each gap below is one missing caller:
+
+- **No channel is ever handed a Claude Code question.** `jarvis/cc/gate.py` writes the `requests` row; the
+  Telegram bot reads the `deliveries` table; nothing calls `jarvis.schedule.routing.deliver` to make the
+  delivery row in between. `routing.deliver`'s only caller is the scheduler's own briefing loop. So a
+  deferred plan question is raised, `/status` even reports "1 open question waiting for you", and there is
+  no way to answer it. This is R3's headline and it is one function call.
+- **Nothing consumes `repo_setup`.** `code_build` files the row; nothing tidies it, reads it back or creates
+  a repository. `project.requested` is published and has zero readers.
+- **Nothing consumes `briefing.started`.** `jarvis/schedule/gate.py` publishes it, `jarvis/briefing/` has no
+  importer outside its own directory, and `navigator.begin()` has no caller. Worse, that event kind is
+  published from TWO places with incompatible payloads.
+- **Nothing reads the event log at all.** `bus.read_since` and `bus.commit_cursor` — the bus's whole consumer
+  API — have no production caller. The hash-chained log is written and never read.
+- **No command creates a `claude_code` job.** The driver works (proved live against the real CLI), but the
+  only caller of `jobs.create_job(kind="claude_code")` outside tests is a spike script.
+
+And two smaller ones: the desk has no wake word, and `DESK.tools` names four tools that do not exist
+(`doctor` prints which). `voice.wake_word` and `voice.output_device` are config keys nothing reads.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is next and what was deliberately cut.
+
+## The bug class this repo is prone to
+
+Found the hard way, twice in one day, and worth stating as a rule: **this tree's tests exercise layers and
+its bugs live between them.** Both were a missing call, not a wrong one, so nothing raised and nothing
+failed:
+
+- `DeskLeg.open()` opened the PortAudio stream and never called `.start()`. Every audio test drives
+  `graph.step` directly, so 1,982 tests were green while the only thing that calls it in production — the
+  device callback — was never armed. `python -m jarvis desk` printed "listening." and was deaf and mute.
+- The desk's terminal listener branched on two event kinds `LiveSession` has never emitted.
+
+When you add a seam, add a test that asserts the CALLER exists, not just that the callee works.

@@ -41,7 +41,7 @@ def test_doctor_fails_while_the_required_credential_is_missing(
     out = capsys.readouterr().out
     assert "gemini_api_key" in out
     assert "python -m jarvis secrets set gemini_api_key" in out
-    assert "must be fixed" in out
+    assert "blocking problem" in out
 
 
 def test_doctor_never_prints_a_credential(
@@ -254,3 +254,131 @@ def test_the_desk_listens_for_event_kinds_that_actually_exist() -> None:
     assert "input_transcript" in emitted, "the audit found the emitter, not this test's parser"
     unknown = sorted(set(cli.DESK_EVENTS) - emitted)
     assert not unknown, f"the desk listens for kinds nothing emits: {unknown}"
+
+
+# ───────────────────────── doctor tells the truth about desk ─────────────────
+
+
+class FakeProbe:
+    def __init__(self, devices: list, defaults: tuple) -> None:
+        self._devices, self._defaults = devices, defaults
+
+    def devices(self) -> list:
+        return self._devices
+
+    def defaults(self) -> tuple:
+        return self._defaults
+
+
+def _devices():
+    from jarvis.audio.devices import DeviceInfo
+
+    return {
+        "headset": DeviceInfo(0, "Jabra Evolve2 40", "ALSA", 1, 2, 48000.0),
+        "mic": DeviceInfo(1, "MacBook Pro Microphone", "CoreAudio", 1, 0, 48000.0),
+        "speakers": DeviceInfo(2, "MacBook Pro Speakers", "CoreAudio", 0, 2, 48000.0),
+    }
+
+
+def use_probe(monkeypatch: pytest.MonkeyPatch, devices: list, defaults: tuple) -> None:
+    import jarvis.audio.devices as dev
+
+    monkeypatch.setattr(dev, "PortAudioProbe", lambda: FakeProbe(devices, defaults))
+    monkeypatch.setattr(cli, "_installed", lambda module: True)
+
+
+def test_doctor_does_not_pass_a_machine_where_desk_cannot_start(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The worst available bug in a command whose whole job is to say "you are ready".
+
+    A laptop whose default input is the built-in mic and whose default output is
+    the built-in speakers is TWO devices and two clocks; ``select_duplex_device``
+    raises ClockSplit and ``desk`` exits 2. An earlier version of this check only
+    looked at whether any device was full-duplex, so it printed "Everything
+    required is present" on exactly that machine.
+    """
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
+    d = _devices()
+    use_probe(monkeypatch, [d["mic"], d["speakers"]], (1, 2))
+
+    assert run(["doctor"], workspace / "j.db") == 1
+    out = capsys.readouterr().out
+    assert "ClockSplit" in out
+    assert "python -m jarvis desk" in out
+
+
+def test_doctor_passes_the_machine_where_desk_can_start(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
+    d = _devices()
+    use_probe(monkeypatch, [d["headset"]], (0, 0))
+
+    assert run(["doctor"], workspace / "j.db") == 0
+    out = capsys.readouterr().out
+    assert "desk would use: Jabra Evolve2 40" in out
+    assert "Nothing blocking" in out
+
+
+def test_doctor_runs_the_same_device_selection_the_desk_runs(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Not a parallel list of conditions — the same function, so they cannot drift."""
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "k")
+    d = _devices()
+    use_probe(monkeypatch, [d["headset"], d["mic"]], (0, 0))
+
+    cfgfile = workspace / "c.toml"
+    cfgfile.write_text('[voice]\ninput_device = "Nonexistent Headset"\n', encoding="utf-8")
+    code = cli.main(["--db", str(workspace / "j.db"), "--config", str(cfgfile), "doctor"])
+    out = capsys.readouterr().out
+    # desk would refuse with DeviceVanished; doctor must refuse with the same words.
+    assert code == 1
+    assert "DeviceVanished" in out
+    assert "Nonexistent Headset" in out
+
+
+def test_the_readiness_list_names_every_process_and_its_blocker(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A front door that does not mention the other three doors is not a front door."""
+    d = _devices()
+    use_probe(monkeypatch, [d["headset"]], (0, 0))
+    run(["doctor"], workspace / "j.db")
+    out = capsys.readouterr().out
+    section = out.split("what you can run")[1]
+    for command in (
+        "python -m jarvis status",
+        "python -m jarvis desk",
+        "python -m jarvis.cc",
+        "python -m jarvis.telegram",
+        "python -m jarvis.schedule",
+    ):
+        assert command in section, command
+    assert "no gemini_api_key" in section
+    # And it must not pretend the driver is usable without a way to make a job.
+    assert "no command creates the job row" in section
+
+
+def test_doctor_checks_the_cli_the_driver_would_actually_run() -> None:
+    """The SDK bundles its own CLI and prefers it; PATH is only its fallback.
+
+    Checking PATH alone is wrong in both directions — "missing" where
+    `pip install -e '.[cc]'` is sufficient, and the version of a binary the
+    driver will never execute, on a repo whose measured facts are pinned to one
+    CLI build.
+    """
+    found = cli.claude_cli_path()
+    if found is None:  # pragma: no cover - the extra is installed in CI
+        pytest.skip("no claude CLI here at all")
+    import shutil as _shutil
+
+    if _installed_sdk():
+        assert "claude_agent_sdk" in found, f"doctor would report {_shutil.which('claude')} instead"
+
+
+def _installed_sdk() -> bool:
+    import importlib.util
+
+    return importlib.util.find_spec("claude_agent_sdk") is not None
