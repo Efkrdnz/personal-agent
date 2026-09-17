@@ -32,6 +32,7 @@ session's tool seam. It does three things worth naming:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import sqlite3
 import time
 from collections import deque
@@ -45,7 +46,7 @@ from jarvis.live.session import ToolCall, ToolResult
 from jarvis.tools.builtin.answer import OPEN_QUESTION
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Registry
-from jarvis.voice.router import Fidelity, Utterance
+from jarvis.voice.router import Fidelity, NoReader, Utterance
 from jarvis.voice.script import script
 
 __all__ = ["Transcript", "DeskQuestions", "LiveTools", "TRANSCRIPT_WINDOW_S", "PRESENT_LEASE_S"]
@@ -210,6 +211,14 @@ class DeskQuestions:
     """
 
     open_db: Callable[[], sqlite3.Connection]
+    #: SYNCHRONOUS AND BLOCKING, and that is a contract rather than a preference.
+    #: :meth:`poll` does blocking SQLite work, so it runs in a worker thread —
+    #: and the real reader, :meth:`jarvis.voice.verbatim.VerbatimSpeaker.speak`,
+    #: is a COROUTINE. Handing it over directly creates a coroutine that nobody
+    #: awaits: nothing is spoken, no exception is raised, and the delivery is
+    #: still marked presented. The user is then asked to answer a question they
+    #: never heard. The composition root passes a bridge that blocks on the loop;
+    #: :meth:`_say` refuses an awaitable rather than letting that happen quietly.
     speak: Callable[[Utterance], Any] | None = None
     channel: str = "desk"
     actor: str = "desk"
@@ -238,6 +247,10 @@ class DeskQuestions:
                 # Settled between the sweep and the claim. Marking it presented
                 # would be a lie; leaving the claim to lapse costs one lease.
                 continue
+            # SAY IT FIRST, MARK IT SECOND. `presented_at` is the record that a
+            # human heard this question, and every other channel trusts it. A
+            # reader that failed must leave the claim to lapse so another desk —
+            # or Telegram, ninety seconds later — still gets to ask.
             self._say(req)
             rq.mark_presented(con, delivery.id, self.actor)
             self.current = req.id
@@ -249,10 +262,19 @@ class DeskQuestions:
         return out
 
     def _say(self, req: rq.Request) -> None:
+        """Read one question aloud, or raise. NEVER return having said nothing."""
         if self.speak is None:
-            return
+            raise NoReader("this desk has no reader attached, so it cannot read a question")
         for utterance in self.utterances(req):
-            self.speak(utterance)
+            result = self.speak(utterance)
+            if inspect.isawaitable(result):
+                # See the note on `speak`. Closing the coroutine keeps the
+                # "never awaited" warning out of the way of the real message.
+                result.close()
+                raise NoReader(
+                    "the reader handed back a coroutine: DeskQuestions.speak must be a "
+                    "synchronous, blocking call. Wrap it with asyncio.run_coroutine_threadsafe."
+                )
 
     @staticmethod
     def utterances(req: rq.Request) -> list[Utterance]:

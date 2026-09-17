@@ -413,3 +413,72 @@ def test_with_no_question_read_the_voice_tool_refuses(dbpath: Path) -> None:
         assert "haven't read you a question" in said
     finally:
         con.close()
+
+
+def test_a_reader_that_returns_a_coroutine_is_refused_loudly(dbpath: Path) -> None:
+    """BUG NUMBER FOUR of this repo's signature class, caught before it shipped.
+
+    ``poll`` runs in a worker thread (blocking SQLite) and the real reader,
+    ``VerbatimSpeaker.speak``, is a coroutine. Handing it over directly creates a
+    coroutine nobody awaits: NOTHING is spoken, no exception is raised, and the
+    delivery is still marked presented — so the user is invited to answer a
+    question they never heard, and `answer_question` will happily settle it.
+    """
+    import inspect as _inspect
+
+    from jarvis.voice.router import NoReader
+    from jarvis.voice.tools import DeskQuestions
+    from jarvis.voice.verbatim import VerbatimSpeaker
+
+    assert _inspect.iscoroutinefunction(VerbatimSpeaker.speak), (
+        "the real reader is a coroutine; that is why this guard exists"
+    )
+
+    req = a_question(dbpath)
+    route(dbpath)
+
+    async def coro_reader(utt: Utterance) -> int:
+        return 0
+
+    desk = DeskQuestions(open_db=opener(dbpath), speak=coro_reader)
+    with pytest.raises(NoReader, match="coroutine"):
+        desk.poll()
+
+    # And the question was NOT marked as presented, so another channel still gets it.
+    con = connect(dbpath)
+    try:
+        presented = con.execute(
+            "SELECT presented_at FROM deliveries WHERE request_id=? AND channel_kind='desk'",
+            (req.id,),
+        ).fetchone()
+        assert presented["presented_at"] is None
+    finally:
+        con.close()
+
+
+def test_a_desk_with_no_reader_does_not_pretend_it_asked(dbpath: Path) -> None:
+    from jarvis.voice.router import NoReader
+    from jarvis.voice.tools import DeskQuestions
+
+    a_question(dbpath)
+    route(dbpath)
+    with pytest.raises(NoReader):
+        DeskQuestions(open_db=opener(dbpath), speak=None).poll()
+
+
+def test_the_desk_app_bridges_the_reader_across_the_thread_boundary() -> None:
+    """The CALLER test: the composition root must build the bridge, not hand over the coroutine.
+
+    Asserted on the source, because the alternative is standing up a sound card.
+    What must be true is that ``run_coroutine_threadsafe`` appears in the path
+    that fills ``questions.speak`` — that call IS the bridge.
+    """
+    import inspect as _inspect
+
+    from jarvis import __main__ as cli
+
+    body = _inspect.getsource(cli.cmd_desk)
+    assert "run_coroutine_threadsafe" in body
+    assert "questions.speak = " in body
+    # And _build_desk must NOT set it, since there is no loop to bridge to yet.
+    assert "speak=" not in _inspect.getsource(cli._build_desk).split("DeskQuestions(")[1][:200]

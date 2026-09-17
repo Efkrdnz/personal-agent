@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from jarvis import answers as ans
 from jarvis import config as cfgmod
 from jarvis import db, jobs, kill, ledger, presence, reconcile, secrets
 from jarvis import requests as rq
@@ -677,8 +678,6 @@ def cmd_answer(args: argparse.Namespace) -> int:
     is answered `1 4 7`. That is the frozen array's own numbering; nothing here
     renumbers anything, and the model (or the human) may never name a label.
     """
-    from jarvis.telegram.channel import build_answer  # pure; moves to the spine with the voice tool
-
     con = db.open_db(args.db)
     try:
         open_ = rq.open_requests(con)
@@ -691,7 +690,7 @@ def cmd_answer(args: argparse.Namespace) -> int:
             return 1
         req = open_[args.which - 1]
         try:
-            answer = build_answer(req, picks=tuple(args.picks), free_text=args.text)
+            answer = ans.build_answer(req, picks=tuple(args.picks), free_text=args.text)
         except Exception as exc:  # noqa: BLE001 - every shape error is the user's to read
             print(f"{exc}", file=sys.stderr)
             return 1
@@ -817,6 +816,22 @@ class StartupRefused(RuntimeError):
     """The desk cannot start, and the message says what to run."""
 
 
+@dataclass
+class Desk:
+    """Everything one desk is made of, so the wiring has a name rather than a tuple.
+
+    ``reader`` is here and not only inside :class:`DeskQuestions` because the
+    bridge that lets a worker thread speak can only be built once there is a
+    running loop, which is after this is assembled.
+    """
+
+    leg: Any
+    graph: Any
+    session: Any
+    questions: Any
+    reader: Any | None
+
+
 def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any | None:
     """The deterministic reader, or None with the reason already printed.
 
@@ -844,8 +859,8 @@ def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any | None:
     )
 
 
-def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
-    """Wire the desk. Returns (leg, graph, session). Raises :class:`StartupRefused`.
+def _build_desk(args: argparse.Namespace) -> Desk:
+    """Wire the desk. Raises :class:`StartupRefused` with a sentence, never a traceback.
 
     Read top to bottom: this is the whole architecture in one function, which is
     the point of having exactly one place allowed to know every layer.
@@ -925,10 +940,10 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
 
     # ── what a sentence is allowed to do ─────────────────────────────────
     transcript = Transcript()
-    questions = DeskQuestions(
-        open_db=lambda: db.open_db(args.db),
-        speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
-    )
+    # `speak` is filled in by cmd_desk once there is a running loop to bridge to.
+    # See DeskQuestions.speak: a coroutine handed over here would be created,
+    # never awaited, and the question marked presented having been said to nobody.
+    questions = DeskQuestions(open_db=lambda: db.open_db(args.db))
     tools = LiveTools(
         registry=registry(),
         # A fresh connection per tool call, opened in the worker thread that
@@ -956,7 +971,7 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
         tools=tools,
         on_event=_desk_event_printer(transcript),
     )
-    return leg, graph, session, questions
+    return Desk(leg=leg, graph=graph, session=session, questions=questions, reader=reader)
 
 
 #: The session event kinds worth a line on the terminal. Taken from the
@@ -1005,10 +1020,11 @@ def cmd_desk(args: argparse.Namespace) -> int:
     from jarvis.live.session import LiveUnavailable
 
     try:
-        leg, graph, session, questions = _build_desk(args)
+        desk = _build_desk(args)
     except (StartupRefused, secrets.MissingSecret) as exc:
         print(str(exc), file=sys.stderr)
         return 2
+    leg, graph, session, questions = desk.leg, desk.graph, desk.session, desk.questions
 
     async def watch_for_questions() -> None:
         """Claim and read aloud every question routed to this desk.
@@ -1017,6 +1033,20 @@ def cmd_desk(args: argparse.Namespace) -> int:
         question is seconds of synthesis and speech, and the loop it would
         otherwise block is the one carrying the user's own voice.
         """
+        loop = asyncio.get_running_loop()
+        if questions.speak is None and desk.reader is not None:
+
+            def say_from_thread(utt: Any) -> int:
+                """Block the worker thread until the reader has finished the clip.
+
+                `run_coroutine_threadsafe` is the whole bridge: the poll runs off
+                the loop (it does blocking SQLite), the reader runs on it, and
+                the thread waits. Without it the coroutine is never awaited and
+                the desk silently reads nothing.
+                """
+                return asyncio.run_coroutine_threadsafe(desk.reader.speak(utt), loop).result(120)
+
+            questions.speak = say_from_thread
         while True:
             try:
                 await asyncio.to_thread(questions.poll)
