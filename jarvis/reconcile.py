@@ -270,9 +270,16 @@ class ProjectStatus:
     the wrong way round — every runner and the Telegram bot would pull audio code
     they never use. The briefing wraps these strings; the wording is decided
     here, where the data is, so it cannot drift from what the rows say.
+
+    ``since`` and ``covered_through`` are the two ends of the window this read
+    ACTUALLY covered. The second one is not decoration: it, and never ``now()``,
+    is what :func:`set_briefing_cursor` is handed once the briefing has been
+    spoken. See there for why the difference is a job that never gets mentioned
+    at all.
     """
 
     since: str
+    covered_through: str
     finished: tuple[JobNote, ...] = ()
     failed: tuple[JobNote, ...] = ()
     blocked: tuple[JobNote, ...] = ()
@@ -300,20 +307,38 @@ def briefing_cursor(con: sqlite3.Connection) -> str | None:
     return None if row is None else str(row["value"])
 
 
-def set_briefing_cursor(con: sqlite3.Connection, ts: str | None = None) -> str:
-    """Advance the briefing cursor. Called AFTER the briefing was actually said.
+def set_briefing_cursor(con: sqlite3.Connection, through: str) -> str:
+    """Advance the briefing cursor to ``through``. Called AFTER it was said.
 
     Deliberately not done by :func:`project_status`: a briefing that was composed
     and then not delivered — the channel dropped, the room was empty — must be
     said again, and a read that advanced the cursor would lose it silently.
+
+    ``through`` IS :attr:`ProjectStatus.covered_through`, AND IT IS NOT ``now()``.
+    Composing a briefing and finishing saying it out loud are seconds apart, and
+    a job that finishes during those seconds was never in the briefing. Stamping
+    the cursor when the speaking finished would claim a window nobody read, and
+    that job would then be excluded from tomorrow's too — said never, which is
+    the failure this whole module is built to avoid. The watermark is the newest
+    row the read actually saw, so the unread gap stays on the far side of the
+    cursor and the next briefing picks it up.
+
+    There is no default for exactly that reason: ``now()`` is the wrong answer
+    often enough that it must not also be the easy one.
+
+    One residue, named rather than papered over: :func:`jarvis.ids.now` writes
+    MILLISECONDS, so a second job finishing in the watermark's own millisecond
+    but committing after this read's snapshot is invisible here and excluded
+    next time. That needs two writers inside one millisecond with the lock
+    handoff straddling the read; it is the price of timestamp cursors, and it is
+    microseconds wide where stamping ``now()`` is seconds wide.
     """
-    value = ts or now()
     con.execute(
         "INSERT INTO cursors (name, value, updated_at) VALUES (?,?,?)"
         " ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (BRIEFING_CURSOR, value, now()),
+        (BRIEFING_CURSOR, through, now()),
     )
-    return value
+    return through
 
 
 def _plural(n: int, one: str, many: str) -> str:
@@ -396,7 +421,8 @@ def project_status(
 
     ``since`` defaults to the briefing cursor, and to 24 hours ago the first time
     a machine ever briefs. Reading does not advance it — see
-    :func:`set_briefing_cursor`.
+    :func:`set_briefing_cursor`, which takes ``covered_through`` off the result
+    once the briefing really was spoken.
 
     ``blocked_threshold_s`` only filters the SPOKEN lines. Everything is in the
     structured fields regardless, so a screen or a "what about the rest?" can
@@ -407,7 +433,17 @@ def project_status(
 
     finished: list[JobNote] = []
     failed: list[JobNote] = []
+    # How far this read actually got. Every row it SAW, not only the ones it had
+    # something to say about: a row it saw and stayed quiet about — a job that
+    # merely started — carries no obligation to mention it later, so stepping
+    # over it loses nothing, while re-scanning it every morning forever would.
+    # ``max`` on the strings is chronological because now() is fixed-width UTC.
+    # Empty window: the watermark stays at ``start``, because a read that saw
+    # nothing has covered nothing new and must not move the cursor into time it
+    # never looked at.
+    covered_through = start
     for job in jobs_since(con, start):
+        covered_through = max(covered_through, job.updated_at)
         if job.state not in TERMINAL_STATES:
             continue
         if job.state == "done":
@@ -461,6 +497,7 @@ def project_status(
 
     return ProjectStatus(
         since=start,
+        covered_through=covered_through,
         finished=tuple(finished),
         failed=tuple(failed),
         blocked=tuple(blocked),

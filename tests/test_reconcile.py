@@ -16,6 +16,7 @@ from __future__ import annotations
 import sqlite3
 import subprocess
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -519,7 +520,7 @@ def test_reading_the_briefing_does_not_consume_it(
 
     # Only after it was actually spoken does the cursor move — and the move is
     # visible to every other process, because it is a row.
-    reconcile.set_briefing_cursor(con)
+    reconcile.set_briefing_cursor(con, again.covered_through)
     assert reconcile.briefing_cursor(other) is not None
     assert reconcile.project_status(other).finished == ()
 
@@ -538,10 +539,90 @@ def test_a_job_that_finished_in_the_cursors_own_millisecond_is_not_said_twice(
         con, kind="claude_code", title="the todo app build", created_by="desk", state="running"
     )
     jobs.set_state(con, job.id, "done")
-    mark = reconcile.set_briefing_cursor(con)
-    con.execute("UPDATE jobs SET updated_at=? WHERE id=?", (mark, job.id))
+    done_at = jobs.get(con, job.id).updated_at  # type: ignore[union-attr]
 
+    reconcile.set_briefing_cursor(con, done_at)
     assert reconcile.project_status(con).finished == ()
+
+
+def test_a_job_that_finishes_while_the_briefing_is_being_read_is_not_lost(
+    con: sqlite3.Connection,
+) -> None:
+    """The cursor marks what was READ, not the clock when the talking stopped.
+
+    Composing the briefing and finishing saying it out loud are seconds apart. A
+    build that finishes in that gap was never in the briefing, so a cursor
+    stamped at now() when the speaking ended would claim it had been covered and
+    it would be dropped from tomorrow's too — said never, which is the one
+    outcome this module exists to prevent.
+    """
+    early = jobs.create_job(
+        con, kind="claude_code", title="the todo app build", created_by="desk", state="running"
+    )
+    jobs.set_state(con, early.id, "done")
+
+    status = reconcile.project_status(con, since=ago(3600))
+    assert [n.job_id for n in status.finished] == [early.id]
+
+    # Speaking the briefing takes real time, and that is the whole subject of
+    # this test, so spend some: without it `late` lands in the same millisecond
+    # as the watermark and the strict cursor drops it for an unrelated reason.
+    time.sleep(0.005)
+
+    # ... and while Jarvis is still talking about that one, this one lands.
+    late = jobs.create_job(
+        con, kind="claude_code", title="the scraper", created_by="desk", state="running"
+    )
+    jobs.set_state(con, late.id, "done")
+
+    reconcile.set_briefing_cursor(con, status.covered_through)
+
+    assert [n.job_id for n in reconcile.project_status(con).finished] == [late.id]
+
+
+def test_a_quiet_briefing_does_not_move_the_cursor_into_time_it_never_read(
+    con: sqlite3.Connection,
+) -> None:
+    """Nothing to say is not permission to skip forward.
+
+    An empty window means the read covered nothing new, so the watermark stays
+    where it started and the next job to finish is still inside the window.
+    """
+    status = reconcile.project_status(con, since=ago(3600))
+    assert status.quiet is True
+    assert status.covered_through == status.since
+
+    reconcile.set_briefing_cursor(con, status.covered_through)
+
+    job = jobs.create_job(
+        con, kind="claude_code", title="the api", created_by="desk", state="running"
+    )
+    jobs.set_state(con, job.id, "done")
+    assert [n.job_id for n in reconcile.project_status(con).finished] == [job.id]
+
+
+def test_the_watermark_counts_rows_it_read_but_had_nothing_to_say_about(
+    con: sqlite3.Connection,
+) -> None:
+    """A job that only STARTED in the window still moves the watermark.
+
+    It is not in ``finished`` and never will be at this timestamp, so leaving the
+    cursor behind it would re-scan it every morning for nothing. It gets a fresh
+    updated_at when it actually finishes, which is after the mark.
+    """
+    job = jobs.create_job(
+        con, kind="claude_code", title="the api", created_by="desk", state="running"
+    )
+
+    status = reconcile.project_status(con, since=ago(3600))
+    assert status.finished == ()
+    assert status.covered_through == jobs.get(con, job.id).updated_at  # type: ignore[union-attr]
+
+    reconcile.set_briefing_cursor(con, status.covered_through)
+
+    time.sleep(0.005)  # it finishes later, not in the mark's own millisecond
+    jobs.set_state(con, job.id, "done")
+    assert [n.job_id for n in reconcile.project_status(con).finished] == [job.id]
 
 
 def test_the_default_window_is_the_briefing_cursor(con: sqlite3.Connection) -> None:
