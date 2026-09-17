@@ -482,6 +482,11 @@ def cmd_tools(args: argparse.Namespace) -> int:
 #: between Claude asking and the terminal saying so — not a timeout on anything.
 RUN_POLL_S = 0.5
 
+#: How often the desk looks for a question routed to it. Two seconds because the
+#: rung is written by another process on its own tick, and a question the user is
+#: waiting on should not sit unread for longer than they would tolerate silence.
+DESK_POLL_S = 2.0
+
 
 def _spawn_runner(
     job_id: str, db_path: str | None, *, resume: bool = False, prompt: str | None = None
@@ -864,7 +869,7 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
     from jarvis.live.session import GenaiConnector, LiveSession, QueuedUplink
     from jarvis.tools.default import registry
     from jarvis.voice.router import TrackSink
-    from jarvis.voice.tools import LiveTools, Transcript
+    from jarvis.voice.tools import DeskQuestions, LiveTools, Transcript
 
     cfg = cfgmod.load(args.config)
     key = secrets.require("gemini_api_key")  # raises MissingSecret with instructions
@@ -920,6 +925,10 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
 
     # ── what a sentence is allowed to do ─────────────────────────────────
     transcript = Transcript()
+    questions = DeskQuestions(
+        open_db=lambda: db.open_db(args.db),
+        speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
+    )
     tools = LiveTools(
         registry=registry(),
         # A fresh connection per tool call, opened in the worker thread that
@@ -928,6 +937,7 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
         channel="desk",
         actor="desk",
         transcript=transcript,
+        questions=questions,
         speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
         extra={"spend_threshold_usd": cfg.spend_threshold_usd},
     )
@@ -946,7 +956,7 @@ def _build_desk(args: argparse.Namespace) -> tuple[Any, Any, Any]:
         tools=tools,
         on_event=_desk_event_printer(transcript),
     )
-    return leg, graph, session
+    return leg, graph, session, questions
 
 
 #: The session event kinds worth a line on the terminal. Taken from the
@@ -995,17 +1005,33 @@ def cmd_desk(args: argparse.Namespace) -> int:
     from jarvis.live.session import LiveUnavailable
 
     try:
-        leg, graph, session = _build_desk(args)
+        leg, graph, session, questions = _build_desk(args)
     except (StartupRefused, secrets.MissingSecret) as exc:
         print(str(exc), file=sys.stderr)
         return 2
 
+    async def watch_for_questions() -> None:
+        """Claim and read aloud every question routed to this desk.
+
+        A separate task rather than a hook in the receive loop: reading a
+        question is seconds of synthesis and speech, and the loop it would
+        otherwise block is the one carrying the user's own voice.
+        """
+        while True:
+            try:
+                await asyncio.to_thread(questions.poll)
+            except Exception as exc:  # noqa: BLE001 - a bad row must not end the conversation
+                print(f"[questions] {type(exc).__name__}: {exc}")
+            await asyncio.sleep(DESK_POLL_S)
+
     async def run() -> None:
         leg.open(graph)
         print("listening. ctrl-c to stop.")
+        watcher = asyncio.create_task(watch_for_questions())
         try:
             await session.run()
         finally:
+            watcher.cancel()
             await session.close()
             leg.close()
 

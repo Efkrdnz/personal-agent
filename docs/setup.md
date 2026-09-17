@@ -114,7 +114,10 @@ rather than this paragraph; it is generated from your machine and this is genera
 **What works today.** `desk` opens your microphone, holds a spoken conversation, and files a build request
 from your own words: `code_build` writes one `repo_setup` job row carrying the transcript, the model and the
 effort level, all three parsed from what you actually said rather than from the model's summary of it.
-`project_status`, `spend` and `reachability` answer for themselves. `python -m jarvis.telegram` binds to your
+`project_status`, `spend` and `reachability` answer for themselves. When a question is routed to the
+desk it is **read aloud by the deterministic reader** — never by Gemini, because the options are an answer
+key — and you answer it by the number you heard: "the second one". The label is looked up from the frozen
+array by code, so a mishearing cannot change what you agreed to. `python -m jarvis.telegram` binds to your
 chat and answers `/status`. `python -m jarvis.schedule` arms the 10am gate and really does put "Good moment
 for your briefing?" on your phone.
 
@@ -124,6 +127,8 @@ caller between two processes, not a missing feature:
 - **Tapping "Now" on the briefing gate composes no briefing.**
   The gate publishes an event nothing listens for.
 - **There is no wake word**: the desk listens from the moment it starts.
+- **The desk does not run the builder itself** — after speaking a build request, run
+  `python -m jarvis build` to carry it forward.
 
 ## Speaking a project into existence
 

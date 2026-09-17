@@ -139,8 +139,9 @@ def test_the_third_party_leg_is_offered_nothing_we_ship(dbpath: Path) -> None:
 def test_drift_between_a_profile_and_the_tools_is_reportable(dbpath: Path) -> None:
     lt = LiveTools(registry=registry(), open_db=opener(dbpath), channel="desk")
     # Named in the profile, not built yet. Silent today; printed by `doctor`.
-    assert "answer_question" in lt.unresolved(DESK)
+    assert set(lt.unresolved(DESK)) == {"explain_option", "job_control"}
     assert "code_build" not in lt.unresolved(DESK)
+    assert "answer_question" not in lt.unresolved(DESK), "built in the answer piece"
     # And the other direction is empty, so every desk tool is actually reachable.
     assert lt.unreachable(DESK) == ()
 
@@ -276,5 +277,139 @@ async def test_a_real_build_goes_all_the_way_to_a_row(dbpath: Path) -> None:
         assert row["model"] == "opus"
         assert row["effort"] == "max"
         assert "no Docker" in row["prompt_text"]
+    finally:
+        con.close()
+
+
+# ───────────────────── the desk learns a question exists ─────────────────────
+
+
+def a_question(dbpath: Path, job_id: str | None = None):
+    from jarvis.cc import gate
+
+    con = connect(dbpath)
+    try:
+        return gate.ensure_request(
+            con,
+            tool_name="AskUserQuestion",
+            input_data={
+                "questions": [
+                    {
+                        "question": "Which database?",
+                        "options": [{"label": "SQLite"}, {"label": "Postgres"}],
+                    }
+                ]
+            },
+            job_id=job_id,
+            tool_use_id="toolu_desk",
+            actor="runner",
+        )
+    finally:
+        con.close()
+
+
+def route(dbpath: Path) -> None:
+    from jarvis.schedule import loop
+
+    con = connect(dbpath)
+    try:
+        loop.tick(con, actor="scheduler")
+    finally:
+        con.close()
+
+
+def test_the_desk_claims_its_rung_and_reads_the_question(dbpath: Path) -> None:
+    """Nothing claimed a desk rung before this existed, so the desk never knew."""
+    from jarvis.voice.tools import DeskQuestions
+
+    req = a_question(dbpath)
+    route(dbpath)
+    said: list[Utterance] = []
+    desk = DeskQuestions(open_db=opener(dbpath), speak=said.append)
+
+    assert desk.poll() == [req.id]
+    assert desk.current == req.id
+    assert [u.text for u in said][1:3] == ["1. SQLite", "2. Postgres"]
+
+
+def test_the_options_are_exact_tier_and_pinned_to_the_reader(dbpath: Path) -> None:
+    """They are an answer key. The conversational voice must never say them."""
+    from jarvis.voice.router import FidelityViolation, assert_routable
+    from jarvis.voice.tools import DeskQuestions
+
+    req = a_question(dbpath)
+    for utterance in DeskQuestions.utterances(req):
+        if utterance.fidelity == "exact":
+            assert utterance.track == "verbatim"
+            with pytest.raises(FidelityViolation):
+                assert_routable(utterance, "live")
+    brackets = [u.earcon for u in DeskQuestions.utterances(req)]
+    assert brackets[0] == "open" and brackets[-1] == "close"
+
+
+def test_a_question_is_read_once_even_by_two_desks(dbpath: Path) -> None:
+    from jarvis.voice.tools import DeskQuestions
+
+    a_question(dbpath)
+    route(dbpath)
+    first = DeskQuestions(open_db=opener(dbpath), speak=lambda u: None, actor="desk-a")
+    second = DeskQuestions(open_db=opener(dbpath), speak=lambda u: None, actor="desk-b")
+    assert len(first.poll()) == 1
+    assert second.poll() == [], "the lease is what stops two desks talking over each other"
+
+
+def test_a_question_answered_elsewhere_is_never_read_out(dbpath: Path) -> None:
+    from jarvis.voice.tools import DeskQuestions
+
+    req = a_question(dbpath)
+    route(dbpath)
+    con = connect(dbpath)
+    try:
+        rq_mod = __import__("jarvis.requests", fromlist=["x"])
+        rq_mod.answer_request(
+            con, req.id, {"answers": {"Which database?": "SQLite"}}, "telegram:1", "button"
+        )
+    finally:
+        con.close()
+    said: list[Utterance] = []
+    desk = DeskQuestions(open_db=opener(dbpath), speak=said.append)
+    assert desk.poll() == []
+    assert said == []
+
+
+def test_answering_by_voice_settles_the_question_the_desk_read(dbpath: Path) -> None:
+    """The whole point: what the desk read is what `answer_question` settles."""
+    from jarvis.tools.default import registry
+    from jarvis.voice.tools import DeskQuestions, LiveTools
+
+    req = a_question(dbpath)
+    route(dbpath)
+    desk = DeskQuestions(open_db=opener(dbpath), speak=lambda u: None)
+    desk.poll()
+
+    lt = LiveTools(registry=registry(), open_db=opener(dbpath), questions=desk)
+    con = connect(dbpath)
+    try:
+        said = lt.registry.dispatch("answer_question", {"option": 2}, lt._ctx(con))
+        assert "Postgres" in said
+        import jarvis.requests as rqm
+
+        assert rqm.get_request(con, req.id).answer["answers"] == {"Which database?": "Postgres"}
+    finally:
+        con.close()
+
+
+def test_with_no_question_read_the_voice_tool_refuses(dbpath: Path) -> None:
+    from jarvis.tools.default import registry
+    from jarvis.voice.tools import DeskQuestions, LiveTools
+
+    a_question(dbpath)
+    route(dbpath)
+    desk = DeskQuestions(open_db=opener(dbpath), speak=lambda u: None)  # never polled
+    lt = LiveTools(registry=registry(), open_db=opener(dbpath), questions=desk)
+    con = connect(dbpath)
+    try:
+        said = lt.registry.dispatch("answer_question", {"option": 1}, lt._ctx(con))
+        assert "haven't read you a question" in said
     finally:
         con.close()

@@ -33,6 +33,14 @@ from typing import Any
 
 from jarvis import answers
 from jarvis import requests as rq
+from jarvis.answers import (  # re-exported: these were this module's before they were the spine's
+    AFFIRMATIVE_LABELS,
+    APPROVE_INDEX,
+    BOOLEAN_KINDS,
+    NEGATIVE_LABELS,
+    AmbiguousApproval,
+    build_answer,
+)
 from jarvis.bus import publish
 from jarvis.telegram import render
 from jarvis.telegram.transport import TelegramError, Transport, TransportError
@@ -49,25 +57,8 @@ __all__ = [
     "needs_confirm",
 ]
 
+
 #: Kinds whose answer the Claude Code driver reads as a BOOLEAN. For these the
-#: option labels are only a rendering; ``approved`` is the load-bearing field.
-BOOLEAN_KINDS = frozenset({"exit_plan", "tool_permission", "confirm_effect"})
-
-#: ``jarvis.cc.gate`` builds those presentations with the affirmative FIRST.
-#: Nothing in the Presentation itself says which option means yes — see the
-#: report on this stage — so the index and the label are BOTH checked and a
-#: disagreement raises rather than resolving to one of them. If the frozen option
-#: array in gate.py is ever reordered, this turns a silently inverted approval
-#: into a refusal to answer at all.
-APPROVE_INDEX = 1
-AFFIRMATIVE_LABELS = frozenset({"Approve", "Allow", "Yes"})
-NEGATIVE_LABELS = frozenset({"Keep planning", "Deny", "No"})
-
-
-class AmbiguousApproval(ValueError):
-    """A yes/no request whose options do not say which one is yes."""
-
-
 @dataclass(frozen=True, slots=True)
 class Outcome:
     """What one update did. ``won`` is None when no race was entered."""
@@ -95,74 +86,6 @@ def needs_confirm(req: rq.Request) -> bool:
         return len(answers.questions_of(req.payload)) > 1
     except answers.MalformedQuestions:
         return False
-
-
-def build_answer(
-    req: rq.Request,
-    *,
-    picks: tuple[int, ...] = (),
-    free_text: str | None = None,
-) -> rq.Answer:
-    """Indices (or the user's own words) in, a spine :class:`Answer` out. PURE.
-
-    Free text on a yes/no request is never an approval. Somebody who types
-    instead of tapping is asking for something other than what was offered, and
-    reading that as consent is the single worst failure this channel could have.
-    """
-    pres = req.presentation
-    if req.kind == "plan_question":
-        # The batch's own grammar: keyed by question string, list for multiSelect.
-        return answers.answer(req.payload, list(picks), free_text)
-
-    if free_text is not None:
-        words = free_text.strip()
-        if not words:
-            raise answers.AnswerShapeError("an empty reply is not an answer")
-        answer: rq.Answer = {"text": words}
-        if req.kind in BOOLEAN_KINDS:
-            answer["approved"] = False
-        question = pres.get("question")
-        if question:
-            answer["answers"] = {str(question): words}
-            answer["sources"] = {str(question): "free_text"}
-        return answer
-
-    if not picks:
-        raise answers.AnswerShapeError("no option was picked")
-    labels = rq.labels_for_indices(pres, list(picks))
-    multi = bool(pres.get("multi"))
-    if not multi and len(labels) != 1:
-        raise answers.AnswerShapeError(
-            f"{req.short_label} takes one option; {len(labels)} were picked"
-        )
-
-    out: rq.Answer = {"text": "; ".join(labels)}
-    if req.kind in BOOLEAN_KINDS:
-        out["approved"] = _approval(pres, picks[0])
-    question = pres.get("question")
-    if question:
-        out["answers"] = {str(question): labels if multi else labels[0]}
-        out["sources"] = {str(question): "option"}
-    return out
-
-
-def _approval(pres: rq.Presentation, index: int) -> bool:
-    label = rq.label_for_index(pres, index)
-    if label in AFFIRMATIVE_LABELS:
-        approved = True
-    elif label in NEGATIVE_LABELS:
-        approved = False
-    else:
-        raise AmbiguousApproval(
-            f"{label!r} is neither an approval nor a refusal I recognise, "
-            "so I will not decide on your behalf"
-        )
-    if approved != (index == APPROVE_INDEX):
-        raise AmbiguousApproval(
-            f"option {index} is {label!r}: the label and the position disagree about "
-            "which choice means yes"
-        )
-    return approved
 
 
 @dataclass(frozen=True, slots=True)

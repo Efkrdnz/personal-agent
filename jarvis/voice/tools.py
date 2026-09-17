@@ -36,16 +36,24 @@ import sqlite3
 import time
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
+from jarvis import requests as rq
 from jarvis.live.profiles import SessionProfile
 from jarvis.live.session import ToolCall, ToolResult
+from jarvis.tools.builtin.answer import OPEN_QUESTION
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Registry
 from jarvis.voice.router import Fidelity, Utterance
+from jarvis.voice.script import script
 
-__all__ = ["Transcript", "LiveTools", "TRANSCRIPT_WINDOW_S"]
+__all__ = ["Transcript", "DeskQuestions", "LiveTools", "TRANSCRIPT_WINDOW_S", "PRESENT_LEASE_S"]
+
+#: How long a desk holds the right to read one question aloud. Long enough to
+#: finish speaking it, short enough that a desk killed mid-sentence hands the
+#: question back rather than taking it to the grave.
+PRESENT_LEASE_S = 90
 
 #: How much of the user's recent speech a build request is allowed to draw on.
 #: Three minutes rather than "the current turn" because a request arrives in
@@ -110,6 +118,8 @@ class LiveTools:
     channel: str = "desk"
     actor: str = "desk"
     transcript: Transcript | None = None
+    #: Which question this desk has read aloud, if any. See :class:`DeskQuestions`.
+    questions: Any | None = None
     #: The deterministic reader. None means nobody but Gemini can speak, and the
     #: response says so rather than the result being lost.
     speak: Callable[[Utterance], Any] | None = None
@@ -163,6 +173,10 @@ class LiveTools:
         extra = dict(self.extra)
         if self.transcript is not None:
             extra["transcript"] = self.transcript.words()
+        if self.questions is not None and self.questions.current:
+            # What "the second one" refers to. Read fresh every call: the desk
+            # may have read a newer question since the model decided to answer.
+            extra[OPEN_QUESTION] = self.questions.current
         return ToolCtx(con=con, channel=self.channel, actor=self.actor, extra=extra)
 
     async def _read_aloud(self, name: str, text: str) -> bool:
@@ -176,3 +190,122 @@ class LiveTools:
         if asyncio.iscoroutine(result):
             await result
         return True
+
+
+@dataclass
+class DeskQuestions:
+    """The desk's half of the request lifecycle: read one aloud, remember which.
+
+    The scheduler writes a ``desk`` rung for every question (it is the first and
+    immediate one, because a user at their desk should not wait ninety seconds
+    for Telegram). Until this existed nothing ever claimed those rungs — the only
+    caller of :func:`jarvis.requests.due_deliveries` in the tree was the Telegram
+    channel — so the desk never learned a question existed and the whole "plan
+    mode as a spoken conversation" requirement had no way to start.
+
+    THE CLAIM IS WHY THIS IS NOT A LOOP OVER OPEN REQUESTS. Two desk processes
+    (an old one that has not noticed it was replaced) must not both read the same
+    question aloud, and a desk killed mid-sentence must hand it back. Both are
+    what the lease on the delivery row is for.
+    """
+
+    open_db: Callable[[], sqlite3.Connection]
+    speak: Callable[[Utterance], Any] | None = None
+    channel: str = "desk"
+    actor: str = "desk"
+    #: The request this desk most recently read. What "the second one" refers to,
+    #: and the only thing :mod:`jarvis.tools.builtin.answer` will settle.
+    current: str | None = None
+    presented: int = 0
+
+    def poll(self, now_ts: str | None = None) -> list[str]:
+        """Claim every due desk rung and read it. Returns the ids actually read."""
+        con = self.open_db()
+        try:
+            return self._present(con, now_ts)
+        finally:
+            con.close()
+
+    def _present(self, con: sqlite3.Connection, now_ts: str | None) -> list[str]:
+        out: list[str] = []
+        for delivery in rq.due_deliveries(con, now_ts):
+            if delivery.channel_kind != self.channel:
+                continue
+            if not rq.claim_delivery(con, delivery.id, self.actor, lease_s=PRESENT_LEASE_S):
+                continue
+            req = rq.get_request(con, delivery.request_id)
+            if req is None or req.state != "pending":
+                # Settled between the sweep and the claim. Marking it presented
+                # would be a lie; leaving the claim to lapse costs one lease.
+                continue
+            self._say(req)
+            rq.mark_presented(con, delivery.id, self.actor)
+            self.current = req.id
+            self.presented += 1
+            out.append(req.id)
+            # ONE PER POLL. Reading two questions back to back gives the user no
+            # gap to answer the first, and `current` can only point at one.
+            break
+        return out
+
+    def _say(self, req: rq.Request) -> None:
+        if self.speak is None:
+            return
+        for utterance in self.utterances(req):
+            self.speak(utterance)
+
+    @staticmethod
+    def utterances(req: rq.Request) -> list[Utterance]:
+        """The clips, at the tier each one has to be spoken at.
+
+        The intro and the options are EXACT for a plan question — they are
+        somebody else's words and an answer key — so they carry the earcon and
+        the router refuses to hand them to the conversational voice. The framing
+        is free prose and is pinned to the reader anyway, because switching
+        voices mid-question is what makes the seam jarring instead of legible.
+        """
+        pres = req.presentation
+        tier: Fidelity = "exact" if pres.get("verbatim") else "faithful"
+        out = [
+            Utterance(
+                text=str(pres["intro"]),
+                fidelity=tier,
+                track="verbatim",
+                earcon="open",
+                tag=f"req:{req.id}",
+                request_id=req.id,
+            )
+        ]
+        out += [
+            Utterance(
+                text=f"{item['index']}. {item['label']}",
+                fidelity=tier,
+                track="verbatim",
+                index=int(item["index"]),
+                label=str(item["label"]),
+                tag=f"req:{req.id}",
+                request_id=req.id,
+            )
+            for item in pres["items"]
+        ]
+        if prompt := str(pres.get("free_text_prompt") or ""):
+            out.append(
+                Utterance(
+                    text=prompt,
+                    fidelity="free",
+                    track="verbatim",
+                    earcon="close",
+                    tag=f"req:{req.id}",
+                    request_id=req.id,
+                )
+            )
+        elif out:
+            out[-1] = replace(out[-1], earcon="close")
+        return out
+
+    def spoken_script(self, req: rq.Request) -> list[str]:
+        """The same numbering a channel with no reader would show. Used by tests."""
+        try:
+            return [line.text for line in script(req.payload)]
+        except Exception:  # noqa: BLE001 - only a plan_question has a questions array
+            return [u.text for u in self.utterances(req)]

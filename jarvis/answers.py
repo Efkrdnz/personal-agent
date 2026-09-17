@@ -48,10 +48,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from jarvis.requests import Answer, Presentation, make_presentation
+from jarvis.requests import (
+    Answer,
+    Presentation,
+    Request,
+    label_for_index,
+    labels_for_indices,
+    make_presentation,
+)
 
 __all__ = [
+    "AFFIRMATIVE_LABELS",
+    "APPROVE_INDEX",
+    "BOOLEAN_KINDS",
     "FREE_TEXT_PROMPT",
+    "NEGATIVE_LABELS",
+    "AmbiguousApproval",
+    "build_answer",
     "MAX_ANSWER_CHARS",
     "AnswerShapeError",
     "MalformedQuestions",
@@ -449,3 +462,101 @@ def validate_answers(
                 f"{question!r} must be a label string or a list of label strings, "
                 f"got {type(value).__name__}"
             )
+
+
+# ───────────────────────────── the answer a CHANNEL builds ─────────────────────────────
+
+"""Everything below was the Telegram channel's, and is nobody's in particular.
+
+It moved for the same reason ``narrate``'s pure half did: the voice layer and
+the CLI need the identical function, and ``jarvis/tools`` may not import
+``jarvis.telegram`` — so leaving it there would have meant a second
+implementation of "turn an index into an Answer", and the one that drifted would
+be the one nobody was looking at. The channel re-exports these names, so every
+existing caller is untouched.
+"""
+
+#: option labels are only a rendering; ``approved`` is the load-bearing field.
+BOOLEAN_KINDS = frozenset({"exit_plan", "tool_permission", "confirm_effect"})
+
+#: ``jarvis.cc.gate`` builds those presentations with the affirmative FIRST.
+#: Nothing in the Presentation itself says which option means yes — see the
+#: report on this stage — so the index and the label are BOTH checked and a
+#: disagreement raises rather than resolving to one of them. If the frozen option
+#: array in gate.py is ever reordered, this turns a silently inverted approval
+#: into a refusal to answer at all.
+APPROVE_INDEX = 1
+AFFIRMATIVE_LABELS = frozenset({"Approve", "Allow", "Yes"})
+NEGATIVE_LABELS = frozenset({"Keep planning", "Deny", "No"})
+
+
+class AmbiguousApproval(ValueError):
+    """A yes/no request whose options do not say which one is yes."""
+
+
+def build_answer(
+    req: Request,
+    *,
+    picks: tuple[int, ...] = (),
+    free_text: str | None = None,
+) -> Answer:
+    """Indices (or the user's own words) in, a spine :class:`Answer` out. PURE.
+
+    Free text on a yes/no request is never an approval. Somebody who types
+    instead of tapping is asking for something other than what was offered, and
+    reading that as consent is the single worst failure this channel could have.
+    """
+    pres = req.presentation
+    if req.kind == "plan_question":
+        # The batch's own grammar: keyed by question string, list for multiSelect.
+        return answer(req.payload, list(picks), free_text)
+
+    if free_text is not None:
+        words = free_text.strip()
+        if not words:
+            raise AnswerShapeError("an empty reply is not an answer")
+        # `reply`, not `answer`: in this module `answer` is the batch builder two
+        # lines above, and a local of that name shadows it.
+        reply: Answer = {"text": words}
+        if req.kind in BOOLEAN_KINDS:
+            reply["approved"] = False
+        question = pres.get("question")
+        if question:
+            reply["answers"] = {str(question): words}
+            reply["sources"] = {str(question): "free_text"}
+        return reply
+
+    if not picks:
+        raise AnswerShapeError("no option was picked")
+    labels = labels_for_indices(pres, list(picks))
+    multi = bool(pres.get("multi"))
+    if not multi and len(labels) != 1:
+        raise AnswerShapeError(f"{req.short_label} takes one option; {len(labels)} were picked")
+
+    out: Answer = {"text": "; ".join(labels)}
+    if req.kind in BOOLEAN_KINDS:
+        out["approved"] = _approval(pres, picks[0])
+    question = pres.get("question")
+    if question:
+        out["answers"] = {str(question): labels if multi else labels[0]}
+        out["sources"] = {str(question): "option"}
+    return out
+
+
+def _approval(pres: Presentation, index: int) -> bool:
+    label = label_for_index(pres, index)
+    if label in AFFIRMATIVE_LABELS:
+        approved = True
+    elif label in NEGATIVE_LABELS:
+        approved = False
+    else:
+        raise AmbiguousApproval(
+            f"{label!r} is neither an approval nor a refusal I recognise, "
+            "so I will not decide on your behalf"
+        )
+    if approved != (index == APPROVE_INDEX):
+        raise AmbiguousApproval(
+            f"option {index} is {label!r}: the label and the position disagree about "
+            "which choice means yes"
+        )
+    return approved
