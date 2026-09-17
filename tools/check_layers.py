@@ -11,8 +11,10 @@ failed, and the two falsifiable seam claims in CLAUDE.md were quietly false.
 The direction is inwards, always:
 
     the spine knows nothing about anybody
-    a channel (telegram, capture) knows the spine
-    the desk (voice, audio) knows the spine
+    the github client knows the spine
+    the project lifecycle knows the spine and the github client
+    a channel (telegram, capture) knows the spine and the project lifecycle
+    the desk (voice, audio) knows the spine and the project lifecycle
     the driver (cc) knows the spine, and neither a channel nor a sound card
     only the top-level apps know all three
 
@@ -45,16 +47,68 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.live",
         "jarvis.telegram",
         "jarvis.capture",
+        "jarvis.github",
+        # Stage 4's upper layer. `jarvis.effects` classifying `github.repo_create`
+        # is NOT the spine knowing how to make one: the spine has to keep
+        # importing under `python -S` on a box with no token and no workspace.
+        "jarvis.project",
     ),
     # A channel reaches Claude Code through rows in ``requests`` and nothing
     # else. Importing the desk would make it unable to run on a headless box,
     # which is every box it will ever run on.
-    "jarvis/telegram": ("jarvis.cc", "jarvis.voice", "jarvis.audio", "jarvis.live"),
-    "jarvis/capture": ("jarvis.cc", "jarvis.voice", "jarvis.audio", "jarvis.live"),
+    "jarvis/telegram": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.github",
+    ),
+    "jarvis/capture": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.github",
+    ),
+    # An outward PROVIDER adapter: it reaches GitHub over HTTPS and knows the
+    # spine's vocabulary (jarvis.effects owns the promise words its spoken line is
+    # checked against) and nothing else. In particular not a channel: whether the
+    # confirmation was tapped on Telegram or spoken at the desk is none of its
+    # business, and the whole capability matrix has to be readable on a headless
+    # box with no sound card. The reverse direction is the one above: the spine
+    # must keep importing under `python -S`, and urllib.request is not that.
+    "jarvis/github": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.capture",
+        # The provider adapter is BELOW the lifecycle that drives it. It knows how
+        # to create a repository; whether one should be created, what it is called
+        # and which job it belongs to are decisions it must never be able to read.
+        "jarvis.project",
+    ),
+    # THE PROJECT LIFECYCLE: above the github client, below everything that
+    # speaks. It raises `requests` rows, writes `effects` and `outbox` rows and
+    # creates the `jobs` row with a cwd — and that row is the ENTIRE handover to
+    # the driver, which is why reaching into `jarvis.cc` from here would quietly
+    # make stage 6's "phone touches zero files in jarvis/cc" claim false. It must
+    # also not know which channel will present its read-back: the same
+    # confirmation is tapped on Telegram, spoken at the desk and keyed on a phone,
+    # and a lifecycle that imported one of them could only ever be answered there.
+    "jarvis/project": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.capture",
+    ),
     # The desk speaks and listens. Which channel is attached is not its business,
     # and the driver is a process it talks to through the database.
-    "jarvis/voice": ("jarvis.cc", "jarvis.telegram"),
-    "jarvis/audio": ("jarvis.cc", "jarvis.telegram"),
+    "jarvis/voice": ("jarvis.cc", "jarvis.telegram", "jarvis.github"),
+    "jarvis/audio": ("jarvis.cc", "jarvis.telegram", "jarvis.github"),
     # The other half of the same seam, and the half the answer-shape move was
     # about: the driver NEVER SPEAKS and does not know which channel is attached.
     # Without this the guard is one-directional — it would have caught the voice

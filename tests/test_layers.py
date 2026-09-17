@@ -118,8 +118,11 @@ def test_a_module_whose_name_merely_starts_the_same_is_not_a_violation(tmp_path:
 
 def test_the_checker_reports_a_planted_violation(tmp_path: Path) -> None:
     """End to end, through the same entry point CI runs."""
-    for part in ("jarvis/telegram", "jarvis/capture", "jarvis/voice", "jarvis/audio", "jarvis/cc"):
-        (tmp_path / part).mkdir(parents=True)
+    # Every layer in RULES, derived rather than listed: a layer added to the
+    # guard and forgotten here would make its own rule report "vacuously" and
+    # fail this test for a reason that has nothing to do with the planted import.
+    for part in (layer for layer in RULES if layer != "spine"):
+        (tmp_path / part).mkdir(parents=True, exist_ok=True)
         (tmp_path / part / "__init__.py").write_text("")
     (tmp_path / "jarvis" / "answers.py").write_text("from jarvis.voice import script\n")
     (tmp_path / "jarvis" / "telegram" / "channel.py").write_text("from jarvis.cc import narrate\n")
@@ -131,3 +134,43 @@ def test_the_checker_reports_a_planted_violation(tmp_path: Path) -> None:
     assert any("jarvis/cc/driver.py" in line and "jarvis.voice" in line for line in found)
     # Every rule had files, so no line here is the vacuity warning.
     assert not any("vacuously" in line for line in found)
+
+
+def test_the_project_lifecycle_sits_above_github_and_below_everything_that_speaks() -> None:
+    """Stage 4's seam, in both directions, because one direction is not a seam.
+
+    The lifecycle may reach DOWN to the spine and to the GitHub client. What it
+    must never do is reach UP: a lifecycle that imported ``jarvis.cc`` would make
+    stage 6's "the phone touches zero files in jarvis/cc" claim false by proxy,
+    and one that imported a channel could only ever have its read-back answered
+    on that channel.
+    """
+    reached = [
+        f"{path.relative_to(ROOT).as_posix()} imports {name}"
+        for path in modules_of("jarvis/project", ROOT)
+        for name in sorted(imports_of(path, ROOT))
+        if name.startswith(
+            ("jarvis.cc", "jarvis.voice", "jarvis.audio", "jarvis.live", "jarvis.telegram")
+        )
+    ]
+    assert not reached, "\n".join(reached)
+
+    # And it DOES use the two layers below it, so the rule is not passing because
+    # the package happens to import nothing at all.
+    imported = {
+        name for path in modules_of("jarvis/project", ROOT) for name in imports_of(path, ROOT)
+    }
+    assert any(n.startswith("jarvis.github") for n in imported)
+    assert "jarvis.effects" in imported
+
+
+def test_nothing_below_the_project_lifecycle_imports_it() -> None:
+    """The other half. The spine and the provider adapter must not know it exists."""
+    for layer in ("spine", "jarvis/github"):
+        reached = [
+            f"{path.relative_to(ROOT).as_posix()} imports {name}"
+            for path in modules_of(layer, ROOT)
+            for name in sorted(imports_of(path, ROOT))
+            if name == "jarvis.project" or name.startswith("jarvis.project.")
+        ]
+        assert not reached, "\n".join(reached)
