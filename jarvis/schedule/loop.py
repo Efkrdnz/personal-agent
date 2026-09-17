@@ -1,6 +1,6 @@
-"""One pass of the daemon: fire, expire, act, notify. Everything else is sleeping.
+"""One pass of the daemon: fire, expire, act, notify, route. Everything else is sleeping.
 
-FOUR SWEEPS, each of which is safe to run twice and safe to interrupt anywhere:
+FIVE SWEEPS, each of which is safe to run twice and safe to interrupt anywhere:
 
 ``fire``      due schedules, claimed one at a time, one late fire at most.
 ``expire``    the spine's typed ``on_timeout`` outcomes, which need SOMEBODY to
@@ -9,6 +9,15 @@ FOUR SWEEPS, each of which is safe to run twice and safe to interrupt anywhere:
               answer may have arrived on a channel this process has never heard
               of, hours after the question was asked.
 ``notify``    jobs that finished since the cursor, routed by presence.
+``route``     questions somebody ELSE raised and nobody has been asked about.
+
+THE FIFTH SWEEP IS WHY THE PHONE STAGE IS A RE-WIRING. ``jarvis/cc`` raises a
+row when Claude Code asks something and then blocks; it may not import this
+package, and it must not know which channel will answer — that is the whole
+seam. So somebody has to stand between "a question exists" and "a channel was
+told", and it is this process, because deciding WHEN you get asked is already
+its job. Without it the question is raised, ``/status`` reports it, and no
+channel can ever present it: which is exactly how this shipped for one release.
 
 NO CLOCK OF ITS OWN. Every function takes ``now_ts``; the process passes
 :func:`jarvis.ids.now` once per tick so that the four sweeps agree about what
@@ -44,10 +53,28 @@ __all__ = [
     "fire_due",
     "handle_gate_answers",
     "notify_finished",
+    "ROUTABLE_KINDS",
+    "RouteReport",
+    "route_undelivered",
     "set_completion_cursor",
     "sweep_expiries",
     "tick",
 ]
+
+#: Request kinds this sweep is responsible for: the ones a DRIVER raises and no
+#: other sweep owns. Deliberately a list rather than "everything pending".
+#:
+#: A briefing gate is raised AND delivered by ``fire_due`` in the same breath,
+#: and ``handle_gate_answers`` re-asks a snoozed one with ``deliver_after`` set
+#: five minutes out. A blind sweep would route that row again with no snooze and
+#: steal it — the user would be asked immediately, having just said "in five
+#: minutes". So this sweep names what it owns, and a kind that is not here is
+#: somebody else's to deliver.
+#:
+#: GROWS ONE KIND AT A TIME, as each raiser gets a runner. When the project
+#: builder lands, its read-back kind joins this tuple and the test below is what
+#: notices if it does not.
+ROUTABLE_KINDS: frozenset[str] = frozenset({"plan_question", "exit_plan", "tool_permission"})
 
 #: Where "which finished jobs have already been told to the user" lives. The
 #: cursors table is the shared key-value store migration 001 names; this is one
@@ -82,7 +109,24 @@ class TickReport:
     expired: tuple[rq.Expiry, ...] = ()
     answers: tuple[gate.GateOutcome, ...] = ()
     notices: tuple[completion.Notice, ...] = ()
+    routed: tuple[RouteReport, ...] = ()
     unknown_handlers: tuple[str, ...] = field(default=())
+
+
+@dataclass(frozen=True, slots=True)
+class RouteReport:
+    """One question this sweep handed to the ladder, and where it went.
+
+    ``channels`` empty means presence reached nobody — the question is raised and
+    undeliverable, which is a real state and not an error. ``skipped`` is the
+    sentence saying why it was not routed at all.
+    """
+
+    request_id: str
+    kind: str
+    short_label: str
+    channels: tuple[str, ...] = ()
+    skipped: str | None = None
 
 
 def _fire_briefing_gate(
@@ -349,6 +393,68 @@ def notify_finished(
     return out
 
 
+def route_undelivered(
+    con: sqlite3.Connection, *, actor: str, now_ts: str | None = None
+) -> list[RouteReport]:
+    """THE MISSING CALLER. Hand every unrouted driver question to the ladder.
+
+    Routes UNCONDITIONALLY rather than first asking "does this row already have
+    deliveries". That looks wasteful and is the whole correctness argument:
+
+    * :func:`jarvis.requests.schedule_delivery` is idempotent per
+      ``(request, channel, attempt)``, so re-routing a question costs one
+      no-op INSERT and cannot ask anybody twice.
+    * :func:`jarvis.schedule.routing.deliver` is NOT atomic across rungs — it
+      loops, and each rung opens its own transaction. A process killed between
+      the desk rung and the Telegram rung leaves a half-ladder, and a
+      "skip rows that already have deliveries" guard would make that half-ladder
+      PERMANENT: the user would be asked only on a channel nobody is listening
+      to, forever, with no error anywhere.
+    * ``deliver`` re-asks presence every time. A question routed while the user
+      was asleep gets a better ladder once they are back, which is precisely the
+      behaviour ``deliver``'s own docstring promises and a guard would defeat.
+
+    So the sweep is self-healing by construction, and the cost of that is one
+    SELECT per tick per open question.
+    """
+    ts = now_ts or now()
+    out: list[RouteReport] = []
+    for req in rq.open_requests(con):
+        if req.kind not in ROUTABLE_KINDS:
+            continue
+        try:
+            if req.job_id is not None:
+                job = jobs.get(con, req.job_id)
+                if job is None or job.state in jobs.TERMINAL_STATES:
+                    # Its driver is gone. Asking would be asking on behalf of
+                    # nobody: whatever the answer, there is no process left to
+                    # consume it. Reported rather than cancelled — deciding a
+                    # question is moot belongs to reconcile, not to the router.
+                    out.append(
+                        RouteReport(req.id, req.kind, req.short_label, skipped="the job is over")
+                    )
+                    continue
+            made = deliver(con, req, now_ts=ts)
+            out.append(
+                RouteReport(req.id, req.kind, req.short_label, tuple(d.channel_kind for d in made))
+            )
+        except Exception as exc:  # noqa: BLE001 - see fire_due: one bad row must not cost the rest
+            # A busy timeout under a second scheduler is a supported
+            # configuration, and without this it would take out the other four
+            # sweeps with it, every tick, until somebody noticed exit 5 in a loop.
+            publish(
+                con,
+                "request.route_failed",
+                actor,
+                {"kind": req.kind, "error": f"{type(exc).__name__}: {exc}"},
+                request_id=req.id,
+            )
+            out.append(
+                RouteReport(req.id, req.kind, req.short_label, skipped=f"{type(exc).__name__}")
+            )
+    return out
+
+
 def tick(
     con: sqlite3.Connection,
     *,
@@ -369,10 +475,17 @@ def tick(
     expired = sweep_expiries(con, actor=actor, now_ts=ts)
     answered = handle_gate_answers(con, actor=actor, now_ts=ts)
     notices = notify_finished(con, actor=actor, now_ts=ts)
+    # LAST, and the order is load-bearing. The four sweeps above each raise a
+    # request and deliver it in the same breath — including the snoozed gate,
+    # which `handle_gate_answers` delivers with `deliver_after` five minutes out.
+    # Routing before them would reach that row first, deliver it with no snooze,
+    # and ask the user immediately after they said "in five minutes".
+    routed = route_undelivered(con, actor=actor, now_ts=ts)
     return TickReport(
         fired=tuple(fired),
         expired=tuple(expired),
         answers=tuple(answered),
         notices=tuple(notices),
+        routed=tuple(routed),
         unknown_handlers=tuple(unknown),
     )

@@ -15,6 +15,9 @@ The commands, in the order somebody new to the machine needs them:
     python -m jarvis config init    write a config file with the defaults in it
     python -m jarvis status         what is running, as text
     python -m jarvis tools          the tool surface, per channel
+    python -m jarvis run "..."      start a build and drive Claude Code
+    python -m jarvis pending        the questions waiting on you, numbered
+    python -m jarvis answer 1 2     answer one, by the numbers you were read
     python -m jarvis desk           listen, talk, and drive Claude Code
 
 ``doctor`` is the important one. A voice assistant that fails at startup fails
@@ -28,15 +31,18 @@ import argparse
 import importlib.util
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from jarvis import config as cfgmod
-from jarvis import db, ledger, presence, reconcile, secrets
+from jarvis import db, jobs, kill, ledger, presence, reconcile, secrets
+from jarvis import requests as rq
 
 __all__ = ["build_parser", "main"]
 
@@ -87,8 +93,6 @@ class Report:
 
 
 def _check_runtime(r: Report) -> None:
-    import sqlite3
-
     r.section("runtime")
     v = sys.version_info
     mark = OK if v >= (3, 11) else BAD
@@ -322,15 +326,16 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
 
     cc_why = "" if claude_cli_path() else "no claude CLI (pip install -e '.[cc]')"
     verdict(not cc_why, "python -m jarvis.cc", cc_why)
-    if not cc_why:
-        # Stated because nothing else does: the driver needs a jobs row that no
-        # command in this tree creates, and a user who runs it cold gets exit 4.
-        r.add(WARN, "  ...but no command creates the job row it needs; see docs/setup.md")
+    verdict(not cc_why, "python -m jarvis run", cc_why)
+    r.add(OK, f"{'python -m jarvis pending/answer':<28} — see and settle open questions")
 
     tg_why = "" if have.get("telegram_bot_token") else "no telegram_bot_token (feature off)"
     tail = "" if not tg_why else f"— {tg_why}"
     r.add(OK if not tg_why else WARN, f"{'python -m jarvis.telegram':<28} {tail}")
-    r.add(OK, f"{'python -m jarvis.schedule':<28} — arms the 10am briefing gate")
+    r.add(
+        OK,
+        f"{'python -m jarvis.schedule':<28} — arms the 10am gate AND routes questions to channels",
+    )
     del cfg
 
 
@@ -461,6 +466,242 @@ def cmd_tools(args: argparse.Namespace) -> int:
             print(f"  {tool.name}{tag}")
             if args.verbose:
                 print(f"      {tool.description}")
+    return 0
+
+
+# ───────────────────────────── run, pending, answer ─────────────────────────────
+
+#: How often `run` looks for a question its child has raised. The child blocks
+#: inside `can_use_tool` until the row is answered, so this is the latency
+#: between Claude asking and the terminal saying so — not a timeout on anything.
+RUN_POLL_S = 0.5
+
+
+def _spawn_runner(
+    job_id: str, db_path: str | None, *, resume: bool = False, prompt: str | None = None
+):
+    """`python -m jarvis.cc` as its own OS process, exactly as the docstring says.
+
+    In-process would be simpler and wrong: the driver is designed to be killed,
+    resumed and reparented, and `jarvis/cc/__main__.py` documents exit codes for
+    a supervisor to read. A build must outlive the terminal that started it.
+
+    ``env`` is the whole environment plus JARVIS_DB. A bare dict would strip
+    PATH, HOME and XDG_*, and the CLI the SDK bundles would not start.
+    """
+    argv = [sys.executable, "-m", "jarvis.cc", "--job-id", job_id, "--channel", "cli"]
+    if db_path:
+        argv += ["--db", db_path]
+    if resume:
+        argv += ["--resume"]
+    elif prompt is not None:
+        argv += ["--prompt", prompt]
+    env = {**os.environ}
+    if db_path:
+        env["JARVIS_DB"] = db_path
+    return subprocess.Popen(
+        argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    """Create the `claude_code` job and drive it. The front door the driver lacked.
+
+    Until this existed the only caller of `create_job(kind='claude_code')`
+    outside tests was a spike script, so "drive Claude Code" meant "write Python".
+    """
+    if not _installed("claude_agent_sdk") or claude_cli_path() is None:
+        print(
+            "Claude Code is not installed here: pip install -e '.[cc]'\n"
+            "Run `python -m jarvis doctor` for the whole picture.",
+            file=sys.stderr,
+        )
+        return 2
+
+    cfg = cfgmod.load(args.config)
+    cwd = Path(args.into).expanduser().resolve() if args.into else Path.cwd()
+    if not cwd.is_dir():
+        print(f"{cwd} is not a directory", file=sys.stderr)
+        return 2
+
+    con = db.open_db(args.db)
+    try:
+        if args.resume:
+            return _resume(con, args)
+        job = jobs.create_job(
+            con,
+            kind="claude_code",
+            title=args.title or " ".join(args.prompt.split())[:60],
+            created_by="cli",
+            actor="cli",
+            cwd=str(cwd),
+            model=args.model or cfg.desk.model,
+            effort=args.effort or cfg.desk.effort,
+            permission_mode=args.permission_mode or cfg.desk.permission_mode,
+            prompt_text=args.prompt,
+            # Without this the job is born at epoch 0 and `assert_epoch` refuses
+            # to start it on any machine where the kill switch has EVER fired.
+            kill_epoch=kill.current_epoch(con),
+        )
+        print(f"job {job.id}  in {cwd}  ({job.model}, {job.effort}, {job.permission_mode})")
+        try:
+            child = _spawn_runner(job.id, args.db, prompt=args.prompt)
+        except OSError as exc:
+            # Otherwise the row sits `queued` forever: reconcile only scans
+            # ACTIVE_STATES, so nothing in the system would ever look at it again.
+            jobs.set_state(con, job.id, "failed", actor="cli", stop_reason=f"spawn failed: {exc}")
+            print(f"could not start the runner: {exc}", file=sys.stderr)
+            return 2
+        return _watch(con, job.id, child)
+    finally:
+        con.close()
+
+
+def _resume(con: sqlite3.Connection, args: argparse.Namespace) -> int:
+    """Pick up every job parked on an answer that has since arrived.
+
+    This is the ONE spawner in the tree. ``reconcile`` deliberately refuses to
+    claim a resume when no spawner was passed — claiming without one would spend
+    a resume attempt, move the job to a state nothing scans, and record that the
+    build resumed when no runner exists. Every other process therefore gets
+    ``resumable`` and this one gets ``resumed``.
+    """
+    children: dict[str, Any] = {}
+
+    def spawn(job: jobs.Job) -> None:
+        children[job.id] = _spawn_runner(job.id, args.db, resume=True)
+
+    report = reconcile.reconcile(con, actor="cli", spawn=spawn)
+    if not children:
+        waiting = report.get("awaiting_answer") or []
+        if waiting:
+            print(
+                f"{len(waiting)} job(s) are still waiting on an answer — `python -m jarvis pending`"
+            )
+        elif report.get("needs_human"):
+            print(f"{len(report['needs_human'])} job(s) need a human: out of resume attempts.")
+        else:
+            print("nothing to resume.")
+        # Guarded on `children`, not on report['resumed']: a spawner that threw
+        # leaves the id in `resumed` and `spawn_errors` both, and waiting on an
+        # empty sequence below would be a bare exception instead of a sentence.
+        for err in report.get("spawn_errors") or ():
+            print(f"could not start {err['job_id']}: {err['error']}", file=sys.stderr)
+        return 1 if report.get("spawn_errors") else 0
+
+    worst = 0
+    for job_id, child in children.items():
+        worst = max(worst, _watch(con, job_id, child))
+    return worst
+
+
+def _watch(con: sqlite3.Connection, job_id: str, child) -> int:
+    """Print questions as they are raised, until the child exits."""
+
+    announced: set[str] = set()
+
+    def sweep() -> None:
+        for req in rq.open_requests(con, job_id):
+            if req.id in announced:
+                continue
+            announced.add(req.id)
+            print()
+            print(_render_request(req, len(announced)))
+            print("  answer with:  python -m jarvis answer 1 <number>")
+
+    while child.poll() is None:
+        sweep()
+        time.sleep(RUN_POLL_S)
+    # ONE MORE SWEEP after the child is gone. A question raised between the last
+    # poll and the exit is not a corner case — it is the entire defer path, where
+    # the row is written and the process leaves immediately.
+    sweep()
+
+    job = jobs.get(con, job_id)
+    state = job.state if job else "gone"
+    print(f"\nrunner exited {child.returncode}; job is {state}")
+    if state == "deferred":
+        print("parked on a question. Answer it, then:  python -m jarvis run --resume")
+    elif job and job.result_summary:
+        print(job.result_summary.strip()[:500])
+    return 0 if child.returncode == 0 else 1
+
+
+def _render_request(req: rq.Request, n: int) -> str:
+    """One open question as numbered lines. The SAME numbering every channel uses.
+
+    Built from ``presentation``, not from the raw payload: every request kind has
+    a presentation and only ``plan_question`` has an AskUserQuestion payload, so
+    rendering from the payload would silently show nothing for an exit-plan or a
+    permission question — which are most of them.
+    """
+    pres = req.presentation
+    lines = [f"[{n}] {req.short_label}  ({req.kind})", f"    {pres['intro']}"]
+    lines += [f"    {item['index']}. {item['label']}" for item in pres["items"]]
+    if pres.get("allows_free_text"):
+        lines.append('    or:  python -m jarvis answer <n> --text "your own words"')
+    return "\n".join(lines)
+
+
+def cmd_pending(args: argparse.Namespace) -> int:
+    con = db.open_db(args.db)
+    try:
+        open_ = rq.open_requests(con)
+        if not open_:
+            print("nothing is waiting on you.")
+            return 0
+        for n, req in enumerate(open_, start=1):
+            print(_render_request(req, n))
+            print()
+    finally:
+        con.close()
+    return 0
+
+
+def cmd_answer(args: argparse.Namespace) -> int:
+    """Answer the nth open question by the option numbers you were read.
+
+    The numbers are the ones every channel shows, and they run 1..N across the
+    WHOLE batch rather than restarting per question — so a three-question payload
+    is answered `1 4 7`. That is the frozen array's own numbering; nothing here
+    renumbers anything, and the model (or the human) may never name a label.
+    """
+    from jarvis.telegram.channel import build_answer  # pure; moves to the spine with the voice tool
+
+    con = db.open_db(args.db)
+    try:
+        open_ = rq.open_requests(con)
+        if not 1 <= args.which <= len(open_):
+            print(
+                f"there {'is' if len(open_) == 1 else 'are'} {len(open_)} open question(s); "
+                f"run `python -m jarvis pending`",
+                file=sys.stderr,
+            )
+            return 1
+        req = open_[args.which - 1]
+        try:
+            answer = build_answer(req, picks=tuple(args.picks), free_text=args.text)
+        except Exception as exc:  # noqa: BLE001 - every shape error is the user's to read
+            print(f"{exc}", file=sys.stderr)
+            return 1
+
+        # 'hud', not a new 'cli' mode. ANSWER_MODES is the vocabulary the whole
+        # system reads back ("you approved that by voice"), and a typed answer at
+        # a screen is exactly what 'hud' already means. Inventing a sixth word
+        # for the same fact would make two of them mean the same thing.
+        won = rq.answer_request(con, req.id, answer, answered_by="cli", answer_mode="hud")
+        if not won:
+            fresh = rq.get_request(con, req.id)
+            print(f"too late — it was already answered ({fresh.state if fresh else 'gone'})")
+            return 0
+        print(f"answered: {req.short_label}")
+        job = jobs.get(con, req.job_id) if req.job_id else None
+        if job and job.state == "deferred":
+            # The driver is not sitting on this row: it exited when it deferred.
+            # Without this line the user answers and nothing ever happens.
+            print("that job is parked — resume it:  python -m jarvis run --resume")
+    finally:
+        con.close()
     return 0
 
 
@@ -707,6 +948,33 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("-v", "--verbose", action="store_true", help="show what the model reads")
     t.set_defaults(fn=cmd_tools)
 
+    r = sub.add_parser("run", help="start a build and drive Claude Code")
+    r.add_argument("prompt", nargs="?", default="", help="what to build")
+    r.add_argument("--into", default=None, help="the directory to build in (default: cwd)")
+    r.add_argument("--title", default=None, help="what the briefing calls it")
+    r.add_argument("--model", default=None, help="opus|sonnet|haiku, or a full model id")
+    r.add_argument("--effort", default=None, choices=("low", "medium", "high", "xhigh", "max"))
+    r.add_argument(
+        "--permission-mode",
+        default=None,
+        # 'dontAsk' is absent on purpose: it DENIES AskUserQuestion, which is the
+        # whole mechanism this project is built on. The schema refuses it too.
+        choices=("plan", "default", "acceptEdits", "bypassPermissions"),
+        help="'plan' (the default) plans and asks before writing anything",
+    )
+    r.add_argument("--resume", action="store_true", help="pick up every job parked on an answer")
+    r.set_defaults(fn=cmd_run)
+
+    sub.add_parser("pending", help="the questions waiting on you, numbered").set_defaults(
+        fn=cmd_pending
+    )
+
+    a = sub.add_parser("answer", help="answer a pending question by its option numbers")
+    a.add_argument("which", type=int, help="which question, from `pending`")
+    a.add_argument("picks", nargs="*", type=int, help="the option numbers you were read")
+    a.add_argument("--text", default=None, help="'none of these' — your own words")
+    a.set_defaults(fn=cmd_answer)
+
     sub.add_parser("desk", help="listen, talk, and drive Claude Code").set_defaults(fn=cmd_desk)
     return p
 
@@ -715,6 +983,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "secrets" and args.action in ("set", "forget") and not args.name:
         print("which secret? " + ", ".join(s.name for s in secrets.SECRETS), file=sys.stderr)
+        return 1
+    if args.command == "run" and not args.prompt and not args.resume:
+        print('what should I build? e.g. python -m jarvis run "a todo CLI"', file=sys.stderr)
+        return 1
+    if args.command == "answer" and not args.picks and args.text is None:
+        print("which option? e.g. python -m jarvis answer 1 2", file=sys.stderr)
         return 1
     return int(args.fn(args))
 

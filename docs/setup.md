@@ -123,14 +123,37 @@ caller between two processes, not a missing feature:
 
 - **Nothing consumes the `repo_setup` row.** You will say the sentence, hear "I'll read the requirements
   back to you", and nothing ever will.
-- **A Claude Code plan question reaches no channel.** The driver raises it and blocks; the Telegram bot reads
-  a `deliveries` table that nothing writes for it. `/status` will tell you a question is waiting and there is
-  no way to answer it.
-- **Tapping "Now" on the briefing gate composes no briefing.** The gate publishes an event nothing listens
-  for.
-- **No command creates a Claude Code job.** The driver works, but you would have to write Python to start
-  one — see `spikes/s2_live_slice/run_slice.py` for the shape.
+- **Tapping "Now" on the briefing gate composes no briefing.**
+  The gate publishes an event nothing listens for.
 - **There is no wake word**: the desk listens from the moment it starts.
+
+## Driving Claude Code today
+
+This part works, end to end, and is the reason to install it now:
+
+```bash
+python -m jarvis run "build me a todo CLI that stores tasks in one JSON file" --into ~/code/todo
+```
+
+That creates the job, starts the driver, and prints every question Claude asks as it asks it. From
+another terminal — or another machine sharing the database:
+
+```bash
+python -m jarvis pending          # the questions waiting on you, numbered
+python -m jarvis answer 1 2       # answer the first one with option 2
+python -m jarvis answer 1 --text "put them in Postgres"   # none of these, in your words
+```
+
+The option numbers run 1..N across the whole batch rather than restarting per question, so a
+three-question payload is answered `python -m jarvis answer 1 1 4 7`. They are the same numbers every
+other channel shows, and nothing anywhere renumbers them.
+
+If Claude asks while you are away, the hook parks the job instead of blocking. Answer it whenever you
+like, then `python -m jarvis run --resume` picks up every job whose answer has arrived.
+
+**For those questions to reach Telegram, the scheduler must be running**: `python -m jarvis.schedule`.
+It is the process that decides when and where you get asked, and without it the questions are raised
+and only the `pending` command can see them.
 
 There is one thing a headset buys you beyond comfort: `select_duplex_device` needs your default input and
 your default output to be **the same device**. A laptop's built-in mic and built-in speakers are two devices

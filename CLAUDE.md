@@ -139,11 +139,14 @@ any test could have caught, because every one of them is a caller that does not 
 **NOTHING CONNECTS TWO PROCESSES YET.** This is the single sentence to read before believing anything else
 here. Each gap below is one missing caller:
 
-- **No channel is ever handed a Claude Code question.** `jarvis/cc/gate.py` writes the `requests` row; the
-  Telegram bot reads the `deliveries` table; nothing calls `jarvis.schedule.routing.deliver` to make the
-  delivery row in between. `routing.deliver`'s only caller is the scheduler's own briefing loop. So a
-  deferred plan question is raised, `/status` even reports "1 open question waiting for you", and there is
-  no way to answer it. This is R3's headline and it is one function call.
+- ~~**No channel is ever handed a Claude Code question.**~~ **CLOSED.** `jarvis/schedule/loop.py` has a
+  fifth sweep, `route_undelivered`, which hands every open driver question to `routing.deliver`. It routes
+  UNCONDITIONALLY — `schedule_delivery` is idempotent per `(request, channel, attempt)`, and a guard would
+  make a half-written ladder permanent, since `deliver` is not atomic across rungs. `ROUTABLE_KINDS` names
+  what this sweep owns; a kind that is not there is somebody else's to deliver, which is what stops it
+  stealing a snoozed briefing gate. **The scheduler must be running for Telegram to get questions.**
+- ~~**No command creates a `claude_code` job.**~~ **CLOSED.** `python -m jarvis run "..."`, plus `pending`
+  and `answer` to see and settle questions from a terminal. Verified live end to end against the real CLI.
 - **Nothing consumes `repo_setup`.** `code_build` files the row; nothing tidies it, reads it back or creates
   a repository. `project.requested` is published and has zero readers.
 - **Nothing consumes `briefing.started`.** `jarvis/schedule/gate.py` publishes it, `jarvis/briefing/` has no
@@ -151,9 +154,6 @@ here. Each gap below is one missing caller:
   published from TWO places with incompatible payloads.
 - **Nothing reads the event log at all.** `bus.read_since` and `bus.commit_cursor` — the bus's whole consumer
   API — have no production caller. The hash-chained log is written and never read.
-- **No command creates a `claude_code` job.** The driver works (proved live against the real CLI), but the
-  only caller of `jobs.create_job(kind="claude_code")` outside tests is a spike script.
-
 And two smaller ones: the desk has no wake word, and `DESK.tools` names four tools that do not exist
 (`doctor` prints which). `voice.wake_word` and `voice.output_device` are config keys nothing reads.
 

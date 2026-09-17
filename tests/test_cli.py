@@ -352,13 +352,15 @@ def test_the_readiness_list_names_every_process_and_its_blocker(
         "python -m jarvis status",
         "python -m jarvis desk",
         "python -m jarvis.cc",
+        "python -m jarvis run",
         "python -m jarvis.telegram",
         "python -m jarvis.schedule",
     ):
         assert command in section, command
     assert "no gemini_api_key" in section
-    # And it must not pretend the driver is usable without a way to make a job.
-    assert "no command creates the job row" in section
+    # The two that close the loop: start a build, and settle its questions.
+    assert "python -m jarvis run" in section
+    assert "pending/answer" in section
 
 
 def test_doctor_checks_the_cli_the_driver_would_actually_run() -> None:
