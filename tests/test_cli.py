@@ -193,12 +193,31 @@ def test_status_runs_against_an_empty_database(
 
 
 def test_desk_refuses_with_instructions_rather_than_a_traceback(
-    workspace: Path, capsys: pytest.CaptureFixture[str]
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Every required package present, so the refusal is about the credential.
+    monkeypatch.setattr(cli, "_installed", lambda module: True)
     assert run(["desk"], workspace / "j.db") == 2
     err = capsys.readouterr().err
     assert "gemini_api_key is not set" in err
     assert "python -m jarvis secrets set gemini_api_key" in err
+
+
+def test_the_desk_will_not_start_without_a_reader_voice(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A desk that cannot read a question aloud cannot do the thing it is for.
+
+    It used to start anyway and find out at the worst moment — a build parked on
+    a read-back, the user waiting, and `DeskQuestions._say` raising NoReader into
+    a background task nobody is watching.
+    """
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(cli, "_installed", lambda module: module != "edge_tts")
+    assert run(["desk"], workspace / "j.db") == 2
+    err = capsys.readouterr().err
+    assert "edge_tts" in err
+    assert "tts" in err and "pip install" in err
 
 
 def test_desk_names_the_missing_packages_when_there_are_any(

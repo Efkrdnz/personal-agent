@@ -444,3 +444,100 @@ def test_a_spoken_sentence_becomes_a_build_and_every_hop_is_a_row(
     assert "No Docker" in (child.prompt_text or "")
     assert SPOKEN in (child.prompt_text or ""), "the appendix carries their own words"
     assert jobs.get(con, job.id).state == "done"
+
+
+# ───────────────────────── what the audit found ─────────────────────────
+
+
+def test_a_rename_is_proposed_rather_than_parked_forever(
+    con: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """THE LOOP THAT DID NOT CLOSE.
+
+    "Call it something else" was recorded, the job parked, and nothing ever
+    proposed the new name — so the user answered and never heard from the build
+    again.
+    """
+    deps = deps_for(tmp_path, owner="Efkrdnz")
+    job = a_request(con)
+    first = runner.advance(con, job.id, deps)
+    approve(con, first.request_id or "")
+
+    named = runner.advance(con, job.id, deps)
+    assert named.action == "waiting", "the repo name question"
+
+    # "call it something else" — free text on the create confirmation.
+    say(con, named.request_id or "", "call it comment radar")
+    after = runner.advance(con, job.id, deps)
+
+    assert after.action == "waiting", f"the rename must produce a new question, got {after.action}"
+    assert after.request_id not in (first.request_id, named.request_id)
+    fresh = rq.get_request(con, after.request_id or "")
+    assert fresh is not None and fresh.state == "pending"
+    assert jobs.get(con, job.id).state == "deferred"
+
+
+def test_a_github_outage_parks_with_the_real_reason_not_a_silent_local_build(
+    con: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """Falling through to local would blame a token that is present and working."""
+    from jarvis.github.transport import TransportError
+
+    deps = deps_for(tmp_path, owner="Efkrdnz")
+    job = a_request(con)
+    first = runner.advance(con, job.id, deps)
+    approve(con, first.request_id or "")
+
+    class Dead:
+        def request(self, *a: object, **k: object) -> None:
+            raise TransportError("name resolution failed")
+
+        def __getattr__(self, name: str):
+            raise TransportError("name resolution failed")
+
+    broken = runner.Deps(
+        model_call=deps.model_call,
+        git=deps.git,
+        git_token=deps.git_token,
+        capabilities=deps.capabilities,
+        owner="Efkrdnz",
+        workspace_root=deps.workspace_root,
+        transport=Dead(),
+        actor="builder",
+    )
+    step = runner.advance(con, job.id, broken)
+    assert step.action == "refused"
+    assert jobs.get(con, job.id).state == "parked"
+    assert con.execute("SELECT COUNT(*) c FROM jobs WHERE kind='claude_code'").fetchone()["c"] == 0
+    assert "GitHub" in step.spoken or "couldn't reach" in step.spoken.lower()
+
+
+def test_a_naming_carrier_phrase_is_not_part_of_the_name(
+    con: sqlite3.Connection, tmp_path: Path
+) -> None:
+    """ "call it comment radar" is the repository `comment-radar`, not `call-it-comment-radar`.
+
+    The user would only find out at the read-back, having by then said the name
+    twice and heard it wrong twice.
+    """
+    assert runner._without_carrier("call it comment radar") == "comment radar"
+    assert runner._without_carrier("name it the scraper") == "the scraper"
+    assert runner._without_carrier("rename the repository jarvis") == "jarvis"
+    # A name that merely starts with an ordinary word is untouched.
+    assert runner._without_carrier("comment radar") == "comment radar"
+    assert runner._without_carrier("caller id lookup") == "caller id lookup"
+
+
+def test_the_renamed_repository_is_the_name_they_said(
+    con: sqlite3.Connection, tmp_path: Path
+) -> None:
+    deps = deps_for(tmp_path, owner="Efkrdnz")
+    job = a_request(con)
+    first = runner.advance(con, job.id, deps)
+    approve(con, first.request_id or "")
+    named = runner.advance(con, job.id, deps)
+    say(con, named.request_id or "", "call it comment radar")
+
+    after = runner.advance(con, job.id, deps)
+    assert "comment-radar" in after.spoken
+    assert "call-it" not in after.spoken

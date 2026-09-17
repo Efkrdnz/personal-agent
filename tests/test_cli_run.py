@@ -335,3 +335,100 @@ def test_resume_with_nothing_parked_says_so(
 ) -> None:
     assert run_cli(["run", "--resume"], dbpath) == 0
     assert "nothing to resume" in capsys.readouterr().out
+
+
+# ───────────────────── answering the question you actually read ─────────────────────
+
+
+def test_answering_by_id_is_immune_to_the_list_shifting(
+    dbpath: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A position is resolved AFTER the user types it, and the list moves.
+
+    With two builds running, `answer 1 2` read one question and settled its
+    neighbour — an `Allow` landing on a tool permission nobody had read.
+    """
+    first = a_question(dbpath)
+    con = connect(dbpath)
+    try:
+        second = gate.ensure_request(
+            con,
+            tool_name="AskUserQuestion",
+            input_data={
+                "questions": [
+                    {
+                        "question": "Run rm -rf build?",
+                        "options": [{"label": "Allow"}, {"label": "Deny"}],
+                    }
+                ]
+            },
+            job_id=None,
+            tool_use_id="toolu_second",
+            actor="runner",
+        )
+        # The user read `pending`, then something answered the FIRST one elsewhere.
+        rq.answer_request(
+            con,
+            first.id,
+            {"answers": {"How should todos be stored?": "SQLite"}},
+            "telegram:1",
+            "button",
+        )
+    finally:
+        con.close()
+
+    # The id they were shown still means what it meant.
+    assert run_cli(["answer", second.id, "2"], dbpath) == 0
+    con = connect(dbpath)
+    try:
+        assert rq.get_request(con, second.id).answer["answers"] == {"Run rm -rf build?": "Deny"}
+    finally:
+        con.close()
+
+
+def test_pending_prints_the_id_the_answer_command_takes(
+    dbpath: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    req = a_question(dbpath)
+    run_cli(["pending"], dbpath)
+    out = capsys.readouterr().out
+    assert req.id in out
+    assert f"python -m jarvis answer {req.id}" in out
+
+
+def test_a_stale_position_refuses_rather_than_settling_its_neighbour(
+    dbpath: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    a_question(dbpath)
+    assert run_cli(["answer", "4", "1"], dbpath) == 1
+    assert "no open question" in capsys.readouterr().err
+
+
+# ───────────────────── the child's own words ─────────────────────
+
+
+def test_the_child_inherits_the_terminal_rather_than_a_pipe_nobody_reads(
+    dbpath: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A PIPE nobody drains is two bugs: a discarded refusal, and an eventual deadlock.
+
+    `_watch` polls the database and never reads the child's output, so its exit-2
+    refusal ("a settings file would auto-close a pending question") went nowhere,
+    and a chatty child would block forever on a full pipe buffer.
+    """
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **k: captured.update(k) or FakeChild())
+    cli._spawn_runner("job_1", str(dbpath), prompt="x")
+    assert "stdout" not in captured and "stderr" not in captured
+
+
+def test_a_child_that_refuses_at_startup_leaves_a_visible_row(
+    dbpath: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`queued` is scanned by nothing: reconcile looks at ACTIVE_STATES and deferred/orphaned."""
+    monkeypatch.setattr(cli, "_spawn_runner", lambda *a, **k: FakeChild(rc=2))
+    monkeypatch.setattr(cli, "RUN_POLL_S", 0.0)
+    assert run_cli(["run", "build a thing", "--into", str(tmp_path)], dbpath) == 1
+    job = only_job(dbpath)
+    assert job.state == "parked", "a queued row is invisible to every process in the system"
+    assert "exited 2" in (job.stop_reason or "")

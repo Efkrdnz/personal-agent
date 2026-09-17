@@ -245,3 +245,31 @@ def test_a_refusal_reaches_the_user_as_a_sentence(con: sqlite3.Connection) -> No
     said = registry().dispatch("answer_question", {"option": 9}, ctx_for(con, req))
     assert "Sorry" not in said, "a spine LookupError must not surface as a generic failure"
     assert "9" in said
+
+
+def test_free_text_on_a_yes_no_says_that_it_was_not_an_approval(con: sqlite3.Connection) -> None:
+    """`build_answer` records it as approved=False — correctly. Silence about that is not.
+
+    The user says "make it Postgres instead" to an exit-plan question, hears
+    "Right, I've put that down", and their plan has been declined.
+    """
+    req = gate.ensure_request(
+        con,
+        tool_name="ExitPlanMode",
+        input_data={"plan": "Build a todo CLI backed by SQLite."},
+        job_id=None,
+        tool_use_id="toolu_plan",
+        actor="runner",
+    )
+    assert req.kind == "exit_plan"
+    said = ansmod.answer_question(ctx_for(con, req), own_words="make it Postgres instead")
+    assert "isn't an approval" in said
+    assert rq.get_request(con, req.id).answer["approved"] is False
+
+
+def test_free_text_on_a_plan_question_does_not_claim_a_refusal(con: sqlite3.Connection) -> None:
+    """There is nothing to approve on a plan question, so the extra sentence would be noise."""
+    req = ask(con)
+    said = ansmod.answer_question(ctx_for(con, req), own_words="put it in DuckDB")
+    assert "isn't an approval" not in said
+    assert "DuckDB" in said

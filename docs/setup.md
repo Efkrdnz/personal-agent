@@ -153,7 +153,12 @@ Claude Code receives both the confirmed list AND your unedited words as an appen
 tidier cannot lose a constraint.
 
 Run `python -m jarvis build` again after each answer; it advances one step per call, so the state it is
-waiting in is always visible rather than hidden inside a blocking loop.
+waiting in is always visible rather than hidden inside a blocking loop. The last call starts Claude Code
+in the directory for you.
+
+`pending` prints each question's **id**, and `answer` takes it. A bare position works too, but the list
+shifts whenever anything is answered on another channel — with two builds running, answering by position
+could land an `Allow` on a tool permission you never read.
 
 ## Driving Claude Code directly
 
@@ -168,12 +173,12 @@ another terminal — or another machine sharing the database:
 
 ```bash
 python -m jarvis pending          # the questions waiting on you, numbered
-python -m jarvis answer 1 2       # answer the first one with option 2
-python -m jarvis answer 1 --text "put them in Postgres"   # none of these, in your words
+python -m jarvis answer req_ab12cd34 2   # answer that question with option 2
+python -m jarvis answer req_ab12cd34 --text "put them in Postgres"   # in your words
 ```
 
 The option numbers run 1..N across the whole batch rather than restarting per question, so a
-three-question payload is answered `python -m jarvis answer 1 1 4 7`. They are the same numbers every
+three-question payload is answered `python -m jarvis answer <id> 1 4 7`. They are the same numbers every
 other channel shows, and nothing anywhere renumbers them.
 
 If Claude asks while you are away, the hook parks the job instead of blocking. Answer it whenever you

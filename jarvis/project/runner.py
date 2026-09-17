@@ -32,6 +32,7 @@ where the user says yes.
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -364,16 +365,32 @@ def _after_readback(con: sqlite3.Connection, job: jobs.Job, req: rq.Request, dep
         # dishonesty this project exists to avoid.
         return _start_build(con, job, sp, transcript, deps, name=sp.repo_name, repo=None)
 
+    return _propose_name(con, job, sp, transcript, deps, spoken_name=sp.repo_name.replace("-", " "))
+
+
+def _propose_name(
+    con: sqlite3.Connection,
+    job: jobs.Job,
+    sp: spec.Spec,
+    transcript: str,
+    deps: Deps,
+    *,
+    spoken_name: str,
+) -> Step:
+    """Ask about ONE repository name. The only caller of ``lc.propose``."""
     proposal = lc.propose(
         con,
         config=deps.project_config(),
-        spoken_name=sp.repo_name.replace("-", " "),
+        spoken_name=spoken_name,
         transport=deps.transport,  # type: ignore[arg-type]
         actor=deps.actor,
         job_id=job.id,
     )
     if proposal.request_id is None:
-        return _start_build(con, job, sp, transcript, deps, name=sp.repo_name, repo=None)
+        if proposal.state == "cannot_create":
+            return _start_build(con, job, sp, transcript, deps, name=sp.repo_name, repo=None)
+        jobs.set_state(con, job.id, "parked", actor=deps.actor, stop_reason=proposal.state)
+        return Step("refused", proposal.spoken, job.id)
     jobs.mark_blocked(con, job.id, proposal.request_id, actor=deps.actor, state="deferred")
     return Step("waiting", proposal.spoken, job.id, request_id=proposal.request_id)
 
@@ -390,8 +407,21 @@ def _after_name(con: sqlite3.Connection, job: jobs.Job, req: rq.Request, deps: D
     )
     if not made.ok or made.name is None:
         if made.request_id and made.request_id != req.id:
+            # A collision raised a fresh rename question. Park on that one.
             jobs.mark_blocked(con, job.id, made.request_id, actor=deps.actor, state="deferred")
             return Step("waiting", made.spoken, job.id, request_id=made.request_id)
+
+        decided = made.decision
+        if decided is not None and decided.kind == "rename" and decided.spoken_name:
+            # THE LOOP THAT DID NOT CLOSE. "Call it something else" was recorded,
+            # the job parked, and nothing ever proposed the new name — so the
+            # user answered and never heard from the build again.
+            sp, transcript = _spec_from((_newest_readback(con, job.id) or req).payload)
+            _resume(con, job, deps)
+            return _propose_name(
+                con, job, sp, transcript, deps, spoken_name=_without_carrier(decided.spoken_name)
+            )
+
         _resume(con, job, deps)
         jobs.set_state(con, job.id, "parked", actor=deps.actor, stop_reason=made.state)
         return Step("refused", made.spoken, job.id)
@@ -478,6 +508,23 @@ def _resume(con: sqlite3.Connection, job: jobs.Job, deps: Deps) -> None:
     """
     jobs.unblock(con, job.id, state="starting", actor=deps.actor)
     jobs.set_state(con, job.id, "running", actor=deps.actor)
+
+
+#: What a person says around a name rather than as part of it. "call it comment
+#: radar" must become the repository ``comment-radar``, not
+#: ``call-it-comment-radar`` — and the user would only find out at the read-back,
+#: by which point they have said the name twice and heard it wrong twice.
+_CARRIERS = re.compile(
+    r"^\s*(?:please\s+)?(?:let'?s\s+)?"
+    r"(?:call|name|rename)\s+(?:it|them|the\s+repo(?:sitory)?)\s+",
+    re.IGNORECASE,
+)
+
+
+def _without_carrier(spoken: str) -> str:
+    """Strip a leading naming phrase. Returns the input when there is none."""
+    stripped = _CARRIERS.sub("", spoken).strip()
+    return stripped or spoken
 
 
 def _picked(answer: dict[str, Any]) -> str | None:

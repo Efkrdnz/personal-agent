@@ -63,7 +63,11 @@ EXTRAS: tuple[tuple[str, str, str, bool], ...] = (
     ("sounddevice", "voice", "no sound card access", True),
     ("soxr", "voice", "no resampling between 48 kHz and 16 kHz", True),
     ("pywebrtc_audio", "aec", "open speakers cannot barge in; a headset still works", False),
-    ("edge_tts", "tts", "no reader voice, so Gemini reads load-bearing text", False),
+    # REQUIRED for the desk, not a nicety. Without it `DeskQuestions._say`
+    # raises NoReader and the desk can never read a question aloud — which is
+    # the headline feature. `doctor` used to print this as a warning and then
+    # say the desk was ready.
+    ("edge_tts", "tts", "the desk cannot read a question aloud at all", True),
 )
 
 
@@ -516,9 +520,25 @@ def _spawn_runner(
     env = {**os.environ}
     if db_path:
         env["JARVIS_DB"] = db_path
-    return subprocess.Popen(
-        argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-    )
+    # INHERIT the terminal rather than piping. A PIPE nobody reads is two bugs:
+    # the child's refusal — exit 2 is "a settings file would auto-close a pending
+    # question", which is a thing the user must see — is discarded, and a chatty
+    # child eventually BLOCKS forever on a full pipe buffer while the parent
+    # polls for questions that can never come.
+    return subprocess.Popen(argv, env=env)
+
+
+def resume_command(job: jobs.Job | None) -> str:
+    """The command that picks THIS job up. One place, because getting it wrong hurt.
+
+    ``jarvis answer`` used to print ``run --resume`` for every parked job. For a
+    ``repo_setup`` row that handed the build request to the Claude Code driver,
+    which failed it terminally — so the sentence printed after a user approved
+    their build was the command that destroyed it.
+    """
+    if job is not None and job.kind == "repo_setup":
+        return "python -m jarvis build"
+    return "python -m jarvis run --resume"
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -624,7 +644,6 @@ def _watch(con: sqlite3.Connection, job_id: str, child) -> int:
             announced.add(req.id)
             print()
             print(_render_request(req, len(announced)))
-            print("  answer with:  python -m jarvis answer 1 <number>")
 
     while child.poll() is None:
         sweep()
@@ -635,10 +654,19 @@ def _watch(con: sqlite3.Connection, job_id: str, child) -> int:
     sweep()
 
     job = jobs.get(con, job_id)
+    if job is not None and job.state == "queued" and child.returncode != 0:
+        # The child refused before it transitioned anything — a settings file it
+        # would not run under, a forbidden permission mode, no auth. `queued` is
+        # scanned by NOTHING, so the row would be invisible to every process in
+        # the system forever. `parked` is re-queueable by hand.
+        jobs.set_state(
+            con, job_id, "parked", actor="cli", stop_reason=f"runner exited {child.returncode}"
+        )
+        job = jobs.get(con, job_id)
     state = job.state if job else "gone"
     print(f"\nrunner exited {child.returncode}; job is {state}")
-    if state == "deferred":
-        print("parked on a question. Answer it, then:  python -m jarvis run --resume")
+    if state in ("deferred", "blocked"):
+        print(f"parked on a question. Answer it, then:  {resume_command(job)}")
     elif job and job.result_summary:
         print(job.result_summary.strip()[:500])
     return 0 if child.returncode == 0 else 1
@@ -651,12 +679,19 @@ def _render_request(req: rq.Request, n: int) -> str:
     a presentation and only ``plan_question`` has an AskUserQuestion payload, so
     rendering from the payload would silently show nothing for an exit-plan or a
     permission question — which are most of them.
+
+    THE REQUEST ID IS PRINTED, not just the position. A position is resolved
+    after the user has typed it, and the list shifts whenever anything else is
+    answered — so between reading and typing, `answer 1 2` can approve a
+    DIFFERENT question. With two builds running that is an `Allow` landing on a
+    tool permission the user never read.
     """
     pres = req.presentation
-    lines = [f"[{n}] {req.short_label}  ({req.kind})", f"    {pres['intro']}"]
+    lines = [f"[{n}] {req.short_label}  ({req.kind})  {req.id}", f"    {pres['intro']}"]
     lines += [f"    {item['index']}. {item['label']}" for item in pres["items"]]
+    lines.append(f"    answer with:  python -m jarvis answer {req.id} <number>")
     if pres.get("allows_free_text"):
-        lines.append('    or:  python -m jarvis answer <n> --text "your own words"')
+        lines.append(f'    or:           python -m jarvis answer {req.id} --text "your own words"')
     return "\n".join(lines)
 
 
@@ -675,6 +710,21 @@ def cmd_pending(args: argparse.Namespace) -> int:
     return 0
 
 
+def _resolve(open_: list[rq.Request], which: str) -> rq.Request | None:
+    """A request id, or a position from the last `pending`. Ids are preferred.
+
+    The positional form is kept because it is what a person types, but it is
+    resolved against the CURRENT list — so if something was answered on another
+    channel in between, it refuses rather than silently settling its neighbour.
+    """
+    for req in open_:
+        if req.id == which:
+            return req
+    if which.isdigit() and 1 <= int(which) <= len(open_):
+        return open_[int(which) - 1]
+    return None
+
+
 def cmd_answer(args: argparse.Namespace) -> int:
     """Answer the nth open question by the option numbers you were read.
 
@@ -686,14 +736,15 @@ def cmd_answer(args: argparse.Namespace) -> int:
     con = db.open_db(args.db)
     try:
         open_ = rq.open_requests(con)
-        if not 1 <= args.which <= len(open_):
+        req = _resolve(open_, args.which)
+        if req is None:
+            count = len(open_)
             print(
-                f"there {'is' if len(open_) == 1 else 'are'} {len(open_)} open question(s); "
-                f"run `python -m jarvis pending`",
+                f"no open question {args.which!r}. There "
+                f"{'is' if count == 1 else 'are'} {count} — run `python -m jarvis pending`",
                 file=sys.stderr,
             )
             return 1
-        req = open_[args.which - 1]
         try:
             answer = ans.build_answer(req, picks=tuple(args.picks), free_text=args.text)
         except Exception as exc:  # noqa: BLE001 - every shape error is the user's to read
@@ -711,10 +762,10 @@ def cmd_answer(args: argparse.Namespace) -> int:
             return 0
         print(f"answered: {req.short_label}")
         job = jobs.get(con, req.job_id) if req.job_id else None
-        if job and job.state == "deferred":
-            # The driver is not sitting on this row: it exited when it deferred.
-            # Without this line the user answers and nothing ever happens.
-            print("that job is parked — resume it:  python -m jarvis run --resume")
+        if job and job.state in ("deferred", "blocked"):
+            # Whatever raised this is not sitting on the row any more. Without
+            # this line the user answers and nothing ever happens.
+            print(f"that job is parked — pick it up with:  {resume_command(job)}")
     finally:
         con.close()
     return 0
@@ -810,7 +861,28 @@ def cmd_build(args: argparse.Namespace) -> int:
             if step.request_id:
                 print("\n  answer with:  python -m jarvis pending  /  python -m jarvis answer")
             if step.child_job_id:
-                print(f"  now run:  python -m jarvis run --resume   (job {step.child_job_id})")
+                # THE BUILD STARTS HERE. The child is born `queued`, and nothing
+                # in the tree picks a queued job up: `reconcile` scans only
+                # ACTIVE_STATES plus deferred/orphaned, so without this the
+                # approved build sits invisible forever while `status` cheerfully
+                # reports the request "finished".
+                child = jobs.get(con, step.child_job_id)
+                print(f"  starting the build in {step.cwd}")
+                try:
+                    proc = _spawn_runner(
+                        step.child_job_id, args.db, prompt=child.prompt_text if child else None
+                    )
+                except OSError as exc:
+                    jobs.set_state(
+                        con,
+                        step.child_job_id,
+                        "failed",
+                        actor="cli",
+                        stop_reason=f"spawn failed: {exc}",
+                    )
+                    print(f"  could not start the runner: {exc}", file=sys.stderr)
+                    return 2
+                return _watch(con, step.child_job_id, proc)
     finally:
         con.close()
     return 0
@@ -854,8 +926,13 @@ def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any | None:
     from jarvis.voice.verbatim import VerbatimSpeaker
 
     if not _installed("edge_tts"):
-        print(f"{WARN}  no reader voice (pip install -e '.[tts]') — Gemini will read everything")
-        return None
+        # Refused rather than degraded. A desk with no reader can hold a
+        # conversation but can never present a question, and it would find that
+        # out at the worst moment — with a build parked and the user waiting.
+        raise StartupRefused(
+            "no reader voice, so the desk could never read a question aloud — which is "
+            "what it is for. Install it: pip install -e '.[tts]'"
+        )
     track = mixer.track("verbatim", Prio.VERBATIM, content_rate=24_000)
     return VerbatimSpeaker(
         engines=(
@@ -1137,7 +1214,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     a = sub.add_parser("answer", help="answer a pending question by its option numbers")
-    a.add_argument("which", type=int, help="which question, from `pending`")
+    a.add_argument("which", help="the request id from `pending` (or its position)")
     a.add_argument("picks", nargs="*", type=int, help="the option numbers you were read")
     a.add_argument("--text", default=None, help="'none of these' — your own words")
     a.set_defaults(fn=cmd_answer)

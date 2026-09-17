@@ -112,8 +112,23 @@ def answer_question(
 
 
 def _confirmation(req: rq.Request, picks: tuple[int, ...], words: str | None) -> str:
-    """Say back what was recorded, from the frozen array — not from what was heard."""
+    """Say back what was recorded, from the frozen array — not from what was heard.
+
+    THE CONSEQUENCE IS SAID OUT LOUD ON A YES/NO. `build_answer` records free
+    text on an approve/deny question as ``approved: False`` — deliberately, and
+    for a good reason: somebody who answers in their own words instead of
+    approving is asking for something other than what was offered, and reading
+    that as consent is the worst failure this path could have. But staying quiet
+    about it is nearly as bad: the user says "make it Postgres instead" to an
+    exit-plan question, hears "Right, I've put that down", and their plan was
+    declined. So the refusal is named.
+    """
     if words:
+        if req.kind in ans.BOOLEAN_KINDS:
+            return (
+                f"Right — I've put down your own words: {words}. That isn't an approval, "
+                "so I've left it as it was."
+            )
         return f"Right — I've put down your own words: {words}"
     labels = rq.labels_for_indices(req.presentation, list(picks))
     return f"Right — {', '.join(labels)}."

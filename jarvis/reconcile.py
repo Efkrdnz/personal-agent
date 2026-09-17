@@ -92,6 +92,19 @@ DEFAULT_LOOKBACK_S = 24 * 3600.0
 #: ``report["resumable"]``.
 Spawner = Callable[[Job], None]
 
+#: The job kinds a spawner may be handed. Phase 2 is otherwise KIND-BLIND — it
+#: resumes anything deferred or orphaned — and the only spawner in the tree
+#: starts ``python -m jarvis.cc``, which drives Claude Code. Handing it a
+#: ``repo_setup`` row meant the driver ran a build request as if it were a build,
+#: failed it TERMINALLY, and destroyed a project the user had already approved.
+#: Worse, ``jarvis answer`` printed the command that did it.
+#:
+#: A caller may widen this, and must say which kinds its spawner actually knows
+#: how to start. Kinds outside it are reported as ``resumable`` and left alone,
+#: never claimed — a claim spends one of three resume attempts before anything
+#: can refuse.
+SPAWNABLE_KINDS: frozenset[str] = frozenset({"claude_code"})
+
 
 # ───────────────────────────── reconcile ─────────────────────────────
 
@@ -122,6 +135,7 @@ def reconcile(
     actor: str = "reconciler",
     *,
     spawn: Spawner | None = None,
+    spawn_kinds: frozenset[str] = SPAWNABLE_KINDS,
     now_ts: str | None = None,
 ) -> dict[str, Any]:
     """Make the job table tell the truth, and return what changed.
@@ -208,6 +222,13 @@ def reconcile(
             continue
         if job.resume_policy != "auto" or job.resume_count >= RESUME_MAX:
             report["needs_human"].append(job.id)
+            continue
+        if job.kind not in spawn_kinds:
+            # This spawner does not know how to start that kind. Reported, not
+            # claimed: claiming would spend a resume attempt and move the row to
+            # 'starting', where nothing scans for it, before the spawner ever
+            # got the chance to refuse.
+            report["resumable"].append(job.id)
             continue
         if spawn is None:
             # A PROCESS THAT CANNOT SPAWN MUST NOT CLAIM. reconcile() runs at the

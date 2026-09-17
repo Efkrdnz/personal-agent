@@ -104,6 +104,17 @@ class RunOutcome:
         return self.state == "deferred"
 
 
+class WrongJobKind(ValueError):
+    """This runner was handed a job it does not know how to drive."""
+
+    def __init__(self, job_id: str, kind: str) -> None:
+        super().__init__(
+            f"{job_id} is a {kind!r} job; this runner only drives 'claude_code'. "
+            "Nothing was changed."
+        )
+        self.kind = kind
+
+
 class ClaudeJobRunner:
     """Drive one job. Takes the caller's open connection; opens none of its own."""
 
@@ -149,6 +160,13 @@ class ClaudeJobRunner:
         job = jobs.get(self.con, self.job_id)
         if job is None:
             raise jobs.UnknownJob(self.job_id)
+        if job.kind != "claude_code":
+            # Defence in depth against a kind-blind caller. `reconcile`'s phase 2
+            # used to hand this runner a `repo_setup` row, which it then drove to
+            # a TERMINAL failure — destroying a build the user had approved. A
+            # wrong caller must be a refusal, and it must happen here, before any
+            # state has moved.
+            raise WrongJobKind(self.job_id, job.kind)
         return job
 
     def options(self, *, resume: bool = False, allowed_tools: list[str] | None = None) -> Any:
