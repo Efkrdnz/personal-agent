@@ -54,6 +54,13 @@ class Voice:
     #: The Live session's own voice. Changing it takes effect on the NEXT session,
     #: because a reconnect would discard the resumption handle mid-conversation.
     gemini_voice: str = "Zephyr"
+    #: The text model that tidies a spoken build request into a requirement list.
+    #: UNVERIFIED: unlike the Live model, which was measured, nobody has yet run
+    #: a real call against this id from this project. It is here rather than in
+    #: code so that a wrong pin is one line of TOML instead of a patch — the
+    #: failure it causes is a 404 at the first real build, which is exactly when
+    #: editing source is least welcome.
+    tidy_model: str = "gemini-3-flash"
     #: The deterministic reader that speaks load-bearing text. Deliberately a
     #: DIFFERENT voice: "when the other voice speaks, those are somebody else's
     #: exact words" is an audible integrity marker, not a rough edge.
@@ -187,6 +194,7 @@ effort = "high"          # 'high' IS the default; low/medium/xhigh/max change be
 
 [voice]
 model = "gemini-3.8-live"
+tidy_model = "gemini-3-flash"   # UNVERIFIED pin; a 404 at your first build means change this
 gemini_voice = "Zephyr"
 assume_headset = true    # run tools/aec_bench.py before trusting open speakers
 

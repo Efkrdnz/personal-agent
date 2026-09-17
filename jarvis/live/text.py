@@ -29,9 +29,14 @@ __all__ = ["TEXT_MODEL", "GeminiText", "TextCallFailed"]
 
 #: The text model for tidying. Deliberately NOT ``jarvis.live.MODEL``: that is the
 #: LIVE model, a duplex audio endpoint, and asking it for a JSON document is
-#: using the wrong door. This one is overridable per install because — unlike the
-#: Live model, which was MEASURED — nobody has yet run the fidelity probe against
-#: a specific text model here, and a pin nobody has tested should be easy to move.
+#: using the wrong door.
+#:
+#: UNVERIFIED, and said so here rather than discovered at the first real build.
+#: The Live model id in ``jarvis/live/__init__.py`` was MEASURED against a real
+#: connection; this one has not been, and the stale pin it replaced is described
+#: in CLAUDE.md as the single most expensive stale fact in the build sheet. The
+#: caller passes ``voice.tidy_model`` from config.toml, so correcting it is a
+#: line of TOML rather than a patch.
 TEXT_MODEL = "gemini-3-flash"
 
 

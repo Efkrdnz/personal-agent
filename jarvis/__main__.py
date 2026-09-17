@@ -155,6 +155,11 @@ def _check_config(r: Report, path: str | None) -> cfgmod.Config | None:
     r.add(OK, f"timezone {cfg.tz}, workspace {cfg.workspace_path}")
     r.add(OK, f"claude {cfg.desk.model}, effort {cfg.desk.effort}, mode {cfg.desk.permission_mode}")
     r.add(OK, f"gemini {cfg.voice.model}, voice {cfg.voice.gemini_voice}")
+    r.add(
+        WARN,
+        f"tidy model {cfg.voice.tidy_model} — UNVERIFIED; a 404 on your first "
+        f"`build` means change voice.tidy_model in config.toml",
+    )
     if not cfg.desk.github_owner:
         r.add(
             WARN,
@@ -750,7 +755,9 @@ def _builder(args: argparse.Namespace, cfg: cfgmod.Config):
         )
     return Deps(
         model_call=GeminiText(
-            api_key=secrets.require("gemini_api_key"), response_schema=spec.RESPONSE_SCHEMA
+            api_key=secrets.require("gemini_api_key"),
+            model=cfg.voice.tidy_model,
+            response_schema=spec.RESPONSE_SCHEMA,
         ),
         git=SubprocessGit(),
         git_token=token,
