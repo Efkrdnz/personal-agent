@@ -81,6 +81,12 @@ A new phone is **Unpair**, then **Pair my phone** again.
 Windows 11 has a switch that silently gives desktop apps no microphone at all:
 **Settings → Privacy & security → Microphone → Let desktop apps access your microphone** must be **On**.
 
+### Not in the app yet
+
+Building software with Claude Code by voice ("build me a to-do app") is not wired into the app yet, and
+Jarvis says so if you ask rather than pretending to start. It still works from a terminal
+(`python -m jarvis build`), and **Sign in to Claude Code** in Settings is ready for when it arrives.
+
 ## 5. The icon by the clock
 
 Jarvis keeps running when you close its window — it is still listening for "hey Jarvis". It lives as a

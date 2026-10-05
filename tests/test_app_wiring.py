@@ -897,3 +897,51 @@ def test_the_app_passes_the_config_as_it_is_now() -> None:
         if isinstance(n, ast.Call) and _called(n) == "build_window_services"
     )
     assert {"late_key", "reload"} <= {k.arg for k in call.keywords}
+
+
+# ───────────────────────────── no promise the app cannot keep ─────────────────────────────
+
+
+def test_the_app_offers_no_build_it_would_never_carry_out(
+    home: Path, dbpath: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Nothing in the app advances a build request: offered, "build me X" was
+    # filed, promised, never started, and then blocked every later build.
+    assert cli.withheld_tools(in_app=True) == ("code_build",)
+    assert cli.withheld_tools(in_app=False) == ()
+    monkeypatch.setenv("JARVIS_APP", "1")
+    assert cli.withheld_tools() == ("code_build",)
+
+    app_window = cli.build_window_services(Config(), str(dbpath), late_key=True)
+    assert "code_build" not in app_window.registry.names("cli")
+    plain = cli.build_window_services(Config(), str(dbpath))
+    assert "code_build" in plain.registry.names("cli"), "a terminal user can still `jarvis build`"
+
+
+def test_the_desk_in_the_app_says_it_cannot_build(
+    dbpath: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jarvis.live.profiles import DESK
+
+    con = connect(dbpath)
+    try:
+        monkeypatch.setenv("JARVIS_APP", "1")
+        in_app = cli.heard_profile(Config(), con, DESK).system_instruction
+        monkeypatch.delenv("JARVIS_APP")
+        outside = cli.heard_profile(Config(), con, DESK).system_instruction
+    finally:
+        con.close()
+    assert "drive Claude Code" not in in_app and "not available from here" in in_app
+    assert "drive Claude Code" in outside
+
+
+def test_the_app_children_are_told_they_are_in_the_app() -> None:
+    # withheld_tools() reads JARVIS_APP; the supervisor is what sets it.
+    src = (ROOT.parent / "app" / "supervisor.py").read_text(encoding="utf-8")
+    assert '"JARVIS_APP": "1"' in src
+
+
+def test_no_app_process_advances_a_build_yet() -> None:
+    # The day one does, the build tool can be offered in the app again:
+    # withheld_tools() must change with this.
+    assert {s.name for s in sup.app_specs()} == {"desk", "schedule", "telegram"}

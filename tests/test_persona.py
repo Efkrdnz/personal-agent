@@ -53,13 +53,13 @@ def test_address_and_name_are_substituted_everywhere() -> None:
     text = flat(persona.desk_instruction("ma'am", "Ada"))
     assert 'Address the user as "ma\'am"' in text
     assert "The user's name is Ada." in text
-    assert "drizzling, ma'am," in text and "Bold, ma'am." in text
+    assert "drizzling, ma'am," in text and "Six o'clock it is, ma'am." in text
     assert '"sir"' not in text and ", sir" not in text
 
 
 def test_a_name_can_be_the_address() -> None:
     text = flat(persona.character("Tony", "Tony Stark"))
-    assert 'Address the user as "Tony"' in text and "Bold, Tony." in text
+    assert 'Address the user as "Tony"' in text and "Six o'clock it is, Tony." in text
     assert "The user's name is Tony Stark." in text
 
 
@@ -325,3 +325,11 @@ def test_the_composition_root_addresses_the_user_as_configured() -> None:
     assert calls, "no chat is built with the persona at all"
     for call in calls:
         assert {"address", "name"} <= {k.arg for k in call.keywords}, ast.dump(call)
+
+
+def test_no_example_claims_an_action_without_a_tool_doing_it() -> None:
+    # An example with an empty tool step and a claim of work ("building it
+    # now") teaches the model to report work nobody started.
+    for said, first, answer in persona._EXAMPLES:
+        if any(w in answer.lower() for w in ("building", "it is done", "it's done", "started")):
+            assert first, (said, answer)

@@ -39,9 +39,11 @@ __all__ = ["PERSONA", "ChatTurn", "GeminiChat", "persona"]
 PERSONA = text_instruction()
 
 
-def persona(extra: str = "", *, address: str = DEFAULT_ADDRESS, name: str = "") -> str:
+def persona(
+    extra: str = "", *, address: str = DEFAULT_ADDRESS, name: str = "", builds: bool = True
+) -> str:
     """The persona for this user, plus anything channel- or user-specific (their notes, say)."""
-    return "\n\n".join(x for x in (text_instruction(address, name), extra) if x)
+    return "\n\n".join(x for x in (text_instruction(address, name, builds=builds), extra) if x)
 
 
 @dataclass(frozen=True, slots=True)

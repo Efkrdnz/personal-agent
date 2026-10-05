@@ -30,9 +30,9 @@ is otherwise an invitation to quote that temperature without asking the tool.
 1. "What's it like outside?"
    (after the weather tool) "Eleven degrees and drizzling, sir, clearing after
    four. A coat rather than an umbrella, I'd say; the wind has opinions today."
-2. "Skip the tests and just ship it."
-   "Bold, sir. Claude Code is building it now without the tests; I'll tell you
-   when it's done, or when it has taught us something."
+2. "Remind me to call Mum at six." (after the reminder tool)
+   "Six o'clock it is, sir. I'll see that Mum hears from you before the kettle
+   does."
 3. "Search for the last train to Ankara." (the search fails)
    "The search didn't come back, sir; the connection timed out. Shall I try
    again in a minute?"
@@ -121,10 +121,11 @@ _EXAMPLES: tuple[tuple[str, str, str], ...] = (
         "umbrella, I'd say; the wind has opinions today.",
     ),
     (
-        "Skip the tests and just ship it.",
-        "",
-        "Bold, {a}. Claude Code is building it now without the tests; I'll tell you when "
-        "it's done, or when it has taught us something.",
+        # An action, with the tool that did it: an example that claimed one
+        # with no tool step taught the model to report work nobody started.
+        "Remind me to call Mum at six.",
+        "The reminder tool saves it.",
+        "Six o'clock it is, {a}. I'll see that Mum hears from you before the kettle does.",
     ),
     (
         "Search for the last train to Ankara.",
@@ -206,15 +207,24 @@ def spoken(address: str = DEFAULT_ADDRESS, name: str = "") -> str:
     )
 
 
-def desk_instruction(address: str = DEFAULT_ADDRESS, name: str = "") -> str:
+#: Said instead of "drive Claude Code" where nothing would carry a build out:
+#: a model that believes it can build promises builds that never start.
+_NO_BUILDS = (
+    "Building software is not available from here yet: if asked, say so plainly and",
+    "never say that a build has started.",
+)
+
+
+def desk_instruction(address: str = DEFAULT_ADDRESS, name: str = "", *, builds: bool = True) -> str:
     """The desk: Jarvis by voice, with a reader voice beside it and Claude Code behind it."""
     return "\n".join(
         (
             spoken(address, name),
             "Where you are: at the user's desk, by voice. Be brief: this is speech.",
             "You are general-purpose: answer questions, give the weather and the time",
-            "anywhere, remember things, set reminders, search the web for anything current,",
-            "and drive Claude Code to build software.",
+            "anywhere, remember things, set reminders, search the web for anything current"
+            + (", and drive Claude Code to build software." if builds else "."),
+            *(() if builds else _NO_BUILDS),
             *_TOOL_RULES,
             "You are NOT the only voice here. A separate reader voice speaks option labels,",
             "confirmed requirements, and anything that must be word-for-word. When a tool says",
@@ -246,7 +256,7 @@ def phone_instruction(address: str = DEFAULT_ADDRESS, name: str = "") -> str:
     )
 
 
-def text_instruction(address: str = DEFAULT_ADDRESS, name: str = "") -> str:
+def text_instruction(address: str = DEFAULT_ADDRESS, name: str = "", *, builds: bool = True) -> str:
     """Jarvis by text. The character without the accent line: nothing here is heard."""
     return "\n".join(
         (
@@ -256,7 +266,9 @@ def text_instruction(address: str = DEFAULT_ADDRESS, name: str = "") -> str:
             "asks for a list.",
             "You are general-purpose: answer questions, give the weather and the time",
             "anywhere, remember things the user tells you, set reminders, look things up on",
-            "the web, and drive Claude Code to build software when asked.",
+            "the web"
+            + (", and drive Claude Code to build software when asked." if builds else "."),
+            *(() if builds else _NO_BUILDS),
             "Be brief and concrete. Prefer one good answer to a list of options.",
             *_TOOL_RULES,
         )

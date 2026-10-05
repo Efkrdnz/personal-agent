@@ -34,12 +34,29 @@ from jarvis import kill, liveness
 from jarvis.audio.turn import TurnState
 from jarvis.bus import publish
 
-__all__ = ["SAY_ACTOR", "DeskPublisher", "consume_say_commands", "desk_state"]
+__all__ = ["SAY_ACTOR", "DeskPublisher", "consume_say_commands", "desk_state", "language_of"]
 
 #: The command actor for the desk. SHARED, not per-process: two desks racing to
 #: say the same sentence must produce one voice, and a shared actor makes the
 #: claim mutually exclusive (see :func:`jarvis.kill.claim_command`).
 SAY_ACTOR = "desk"
+
+
+#: Letters Turkish has and English text never does. Not ç, ö or ü: German and
+#: French have those, and a wrong "tr" is worse than a missed one, because the
+#: Turkish voice reading English sounds broken where the English voice reading
+#: a Turkish word only sounds foreign.
+_TURKISH_ONLY = frozenset("ğĞşŞıİ")
+
+
+def language_of(text: str, default: str = "en") -> str:
+    """``"tr"`` for text written in Turkish, else ``default``. For the reader's voice.
+
+    The window's free text (a chat reply, a pasted line) arrives with no
+    language attached, and the reader picks its voice by language: read with
+    English letter-to-sound rules, Turkish is not merely accented but garbled.
+    """
+    return "tr" if any(ch in _TURKISH_ONLY for ch in text) else default
 
 
 def desk_state(turn: Any, mixer: Any) -> str:

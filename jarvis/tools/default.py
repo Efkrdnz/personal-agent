@@ -24,11 +24,13 @@ BUILTIN: tuple[Tool, ...] = (
 )
 
 
-def registry(extra: tuple[Tool, ...] = ()) -> Registry:
+def registry(extra: tuple[Tool, ...] = (), *, without: tuple[str, ...] = ()) -> Registry:
     """A fresh registry per process. Never a module-level singleton.
 
     Rule 3: no module-level mutable state. Two registries in one process (the
     desk and a phone leg, say) must be able to differ without one of them
     mutating the other's table out from under it.
     """
-    return Registry((*BUILTIN, *extra))
+    # ``without``: a tool whose work nothing in this process tree would carry
+    # out. Offered anyway, the model promises the work and nothing happens.
+    return Registry(t for t in (*BUILTIN, *extra) if t.name not in without)

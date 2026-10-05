@@ -669,6 +669,20 @@ def locator_for(cfg: cfgmod.Config) -> Any:
     )
 
 
+def withheld_tools(*, in_app: bool | None = None) -> tuple[str, ...]:
+    """Tools nothing in this process tree would carry out, so they are not offered. Wiring only.
+
+    The app runs the desk, the scheduler and the bot (jarvis.app.supervisor's
+    app_specs), and nothing that advances a build: ``python -m jarvis build``
+    does that, from a terminal. Offered in the app, "build me X" was filed,
+    promised, never advanced, and then refused every later build as already
+    in progress. ``in_app`` defaults to whether the app started this process.
+    """
+    if in_app is None:
+        in_app = os.environ.get("JARVIS_APP") == "1"
+    return ("code_build",) if in_app else ()
+
+
 def tool_extra(cfg: cfgmod.Config, api_key: str | None = None) -> dict[str, Any]:
     """What every channel's tools get in ``ctx.extra``. One place, so they cannot differ."""
     extra: dict[str, Any] = {
@@ -735,7 +749,12 @@ def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any
     told = hearing.instruction(lex)
     # How Jarvis addresses the user is a setting, so the two profiles that talk
     # to the user are rebuilt with it; any other profile keeps its own words.
-    addressed = {"desk": manner.desk_instruction, "phone_user": manner.phone_instruction}
+    # And the desk says it can build only where a build would be carried out.
+    builds = "code_build" not in withheld_tools()
+    addressed = {
+        "desk": lambda a, n: manner.desk_instruction(a, n, builds=builds),
+        "phone_user": manner.phone_instruction,
+    }
     build = addressed.get(prof.name)
     base = build(cfg.persona.address, cfg.persona.name) if build else prof.system_instruction
     return replace(
@@ -1054,17 +1073,45 @@ def cmd_answer(args: argparse.Namespace) -> int:
 # ───────────────────────────── say ─────────────────────────────
 
 
-def _play(pcm: bytes, rate: int) -> str | None:
-    """Play PCM16 mono on the default device. None, or the sentence saying why not."""
+def _play(pcm: bytes, rate: int, *, device: int | None = None) -> str | None:
+    """Play PCM16 mono on ``device`` (default: the system's). None, or the sentence saying why not.
+
+    A device that refuses (gone, busy, the wrong rate for its host API) falls
+    back to the system default: the sound coming out of the wrong speaker is
+    better than none.
+    """
     try:
         import numpy as np
         import sounddevice as sd
 
-        sd.play(np.frombuffer(pcm, dtype="<i2"), rate)
+        samples = np.frombuffer(pcm, dtype="<i2")
+        try:
+            sd.play(samples, rate, device=device)
+        except Exception:  # noqa: BLE001 - retried on the default below
+            if device is None:
+                raise
+            sd.play(samples, rate)
         sd.wait()
     except Exception as exc:  # noqa: BLE001 - no PortAudio, no device: say where to look instead
         return f"couldn't play it ({exc})"
     return None
+
+
+def _speaker_for(cfg: cfgmod.Config) -> int | None:
+    """The output the desk would use, for sound played outside it. None: the system default.
+
+    The same selection as the desk's, so a voice sample in Settings or the
+    window speaking while the desk is down comes out of the headset the user
+    chose, not the laptop speakers Windows happens to default to.
+    """
+    if not cfg.voice.input_device:
+        return None
+    try:
+        from jarvis.audio.devices import PortAudioProbe, select_duplex_device
+
+        return select_duplex_device(PortAudioProbe(), name=cfg.voice.input_device).pair[1]
+    except Exception:  # noqa: BLE001 - unplugged, ambiguous, no PortAudio: the default
+        return None
 
 
 def cmd_say(args: argparse.Namespace) -> int:
@@ -1352,7 +1399,7 @@ def build_window_services(
     finally:
         con.close()
 
-    reg = registry()
+    reg = registry(without=withheld_tools(in_app=late_key))
     extra = tool_extra(cfg, key)
     redactor = desk_redactor()
     chat, chat_why = _window_chat(cfg, key, db_path, reg, extra, notes_paragraph)
@@ -1378,7 +1425,7 @@ def build_window_services(
         extra=tools_extra,
         chat=chat,
         chat_why=chat_why,
-        speak=_window_speaker(cfg, db_path, redactor=redactor),
+        speak=_window_speaker(cfg, db_path, redactor=redactor, current=reload),
         wake_word=_wake_phrase(cfg),
         wake_threshold=cfg.voice.wake_threshold,
         spend_threshold_usd=cfg.spend_threshold_usd,
@@ -1467,7 +1514,10 @@ def _window_chat(
         declarations=reg.declarations("cli"),
         dispatch=dispatch,
         system_instruction=persona(
-            extra=notes_paragraph, address=cfg.persona.address, name=cfg.persona.name
+            extra=notes_paragraph,
+            address=cfg.persona.address,
+            name=cfg.persona.name,
+            builds="code_build" in reg.names("cli"),
         ),
     )
 
@@ -1539,7 +1589,9 @@ def _late_chat(now: Any, db_path: str | None, reg: Any, notes_paragraph: str) ->
     return send
 
 
-def _window_speaker(cfg: cfgmod.Config, db_path: str | None, *, redactor: Any = None) -> Any:
+def _window_speaker(
+    cfg: cfgmod.Config, db_path: str | None, *, redactor: Any = None, current: Any = None
+) -> Any:
     """``speak(text) -> "desk" | "local"`` for the window. Wiring only.
 
     Through the desk when it is running — it owns the speaker, and a second
@@ -1549,11 +1601,11 @@ def _window_speaker(cfg: cfgmod.Config, db_path: str | None, *, redactor: Any = 
     import asyncio
 
     from jarvis import kill, liveness
+    from jarvis.voice.desk import language_of
     from jarvis.voice.engines import RATE
     from jarvis.voice.verbatim import VerbatimSpeaker
 
     ladder = tuple(reader_engines(cfg))
-    language = cfg.location.language or "en"
 
     def speak(text: str) -> str:
         con = db.connect(db_path)
@@ -1581,8 +1633,10 @@ def _window_speaker(cfg: cfgmod.Config, db_path: str | None, *, redactor: Any = 
             raise RuntimeError(
                 "there is no voice on this machine (Linux: sudo apt install espeak-ng)"
             )
-        pcm = asyncio.run(VerbatimSpeaker(engines=ladder).pcm_for(text, language, exact=False))
-        if why := _play(pcm, RATE):
+        pcm = asyncio.run(
+            VerbatimSpeaker(engines=ladder).pcm_for(text, language_of(text), exact=False)
+        )
+        if why := _play(pcm, RATE, device=_speaker_for(current() if current else cfg)):
             raise RuntimeError(why)
         return "local"
 
@@ -1978,8 +2032,9 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     # See DeskQuestions.speak: a coroutine handed over here would be created,
     # never awaited, and the question marked presented having been said to nobody.
     questions = DeskQuestions(open_db=lambda: db.open_db(args.db))
+    desk_registry = registry(without=withheld_tools())
     tools = LiveTools(
-        registry=registry(),
+        registry=desk_registry,
         # A fresh connection per tool call, opened in the worker thread that
         # runs it. See jarvis/voice/tools.py.
         open_db=lambda: db.open_db(args.db),
@@ -2200,7 +2255,9 @@ def cmd_desk(args: argparse.Namespace) -> int:
         question is seconds of synthesis and speech, and the loop it would
         otherwise block is the one carrying the user's own voice.
         """
-        from jarvis.voice.desk import consume_say_commands
+        from dataclasses import replace
+
+        from jarvis.voice.desk import consume_say_commands, language_of
         from jarvis.voice.router import Utterance
 
         loop = asyncio.get_running_loop()
@@ -2220,16 +2277,31 @@ def cmd_desk(args: argparse.Namespace) -> int:
             if questions.speak is None:
                 questions.speak = say_from_thread
 
+        say_uncached = None
+        if desk.reader is not None:
+            # The cache is for clips that repeat (option labels, "yes"); the
+            # window's replies never do, and cached they would pile up on disk
+            # for ever, a copy of every reply. Same voice and track, no cache.
+            window_reader = replace(desk.reader, cache=None)
+
+            def say_uncached(utt: Any) -> int:
+                return asyncio.run_coroutine_threadsafe(window_reader.speak(utt), loop).result(120)
+
         def say_for_the_window() -> int:
             """The window's "say this aloud", through THIS process's speaker."""
-            if say_from_thread is None:
+            if say_uncached is None:
                 return 0
             con = db.open_db(args.db)
             try:
                 return consume_say_commands(
                     con,
-                    lambda text: say_from_thread(
-                        Utterance(text=text, fidelity="faithful", tag="window:say")
+                    lambda text: say_uncached(
+                        Utterance(
+                            text=text,
+                            fidelity="faithful",
+                            tag="window:say",
+                            lang=language_of(text),
+                        )
                     ),
                 )
             finally:
@@ -2428,7 +2500,11 @@ def _setup_service(
     preview = None
     if _installed("google.genai"):
         preview = adapters.gemini_preview(
-            key=lambda: secrets.get("gemini_api_key"), model=cfg.voice.tts_model, play=_play
+            key=lambda: secrets.get("gemini_api_key"),
+            model=cfg.voice.tts_model,
+            play=lambda pcm, rate: _play(
+                pcm, rate, device=_speaker_for(_config_or(cfg, args.config))
+            ),
         )
     return SetupService(
         config_path=args.config,
