@@ -40,10 +40,18 @@ PERSONA = text_instruction()
 
 
 def persona(
-    extra: str = "", *, address: str = DEFAULT_ADDRESS, name: str = "", builds: bool = True
+    extra: str = "",
+    *,
+    address: str = DEFAULT_ADDRESS,
+    name: str = "",
+    builds: bool = True,
+    pc: bool = False,
+    vision: bool = False,
+    commands: bool = False,
 ) -> str:
     """The persona for this user, plus anything channel- or user-specific (their notes, say)."""
-    return "\n\n".join(x for x in (text_instruction(address, name, builds=builds), extra) if x)
+    told = text_instruction(address, name, builds=builds, pc=pc, vision=vision, commands=commands)
+    return "\n\n".join(x for x in (told, extra) if x)
 
 
 @dataclass(frozen=True, slots=True)

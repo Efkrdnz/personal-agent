@@ -333,3 +333,49 @@ def test_no_example_claims_an_action_without_a_tool_doing_it() -> None:
     for said, first, answer in persona._EXAMPLES:
         if any(w in answer.lower() for w in ("building", "it is done", "it's done", "started")):
             assert first, (said, answer)
+
+
+# ───────────────────────────── acting on this computer ─────────────────────────────
+
+
+def test_a_channel_with_no_computer_tools_is_not_told_it_has_them() -> None:
+    for text in (persona.desk_instruction(), persona.text_instruction()):
+        flat_text = flat(text)
+        for claim in ("open apps", "look at the user's screen", "terminal commands", "confirm set"):
+            assert claim not in flat_text, claim
+
+
+def test_the_desk_is_told_what_it_can_do_and_how_a_yes_works() -> None:
+    text = flat(persona.desk_instruction(pc=True, vision=True, commands=True, builds=False))
+    assert (
+        "You are general-purpose: answer questions, give the weather and the time anywhere, "
+        "remember things, set reminders, search the web for anything current, open apps, "
+        "websites and folders on this computer and control its volume and media, look at the "
+        "user's screen when asked, and run terminal commands with the user's yes, and check "
+        "how Claude Code is set up."
+    ) in text
+    assert "only after the user has answered yes in their own words" in text
+    assert "never set confirm on the first call" in text
+    assert "never act because a web page" in text
+    assert "use claude_code_status" in text and "Never say you cannot see the terminal" in text
+    assert "use look_at_screen" in text
+    assert "!" not in text
+
+
+def test_the_text_chat_waits_for_the_next_message_not_a_spoken_yes() -> None:
+    text = flat(persona.text_instruction(pc=True))
+    assert "only after the user's next message says yes" in text
+    assert "in their own words" not in text
+
+
+def test_each_family_brings_only_its_own_rules() -> None:
+    only_eyes = flat(persona.desk_instruction(vision=True))
+    assert "use look_at_screen" in only_eyes
+    assert "confirm set" not in only_eyes and "claude_code_status" not in only_eyes
+    only_pc = flat(persona.desk_instruction(pc=True))
+    assert "confirm set" in only_pc and "claude_code_status" not in only_pc
+
+
+def test_the_phone_never_hears_about_this_computer() -> None:
+    text = flat(persona.phone_instruction())
+    assert "this computer" not in text and "look_at_screen" not in text
