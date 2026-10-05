@@ -39,6 +39,7 @@ from jarvis.audio.devices import (
     open_duplex_stream,
     select_duplex_device,
     stream_delay_ms,
+    unavailable,
 )
 from jarvis.audio.dsp import (
     AecUnavailable,
@@ -281,15 +282,22 @@ class DeskLeg:
             played = graph.step(np.asarray(indata, dtype=np.int16).reshape(-1))
             outdata[:, 0] = played
 
-        self._stream = open_duplex_stream(selection, callback, block=self.block)
+        try:
+            self._stream = open_duplex_stream(selection, callback, block=self.block)
+        except Exception:
+            self.close()  # the mixer claim, as below
+            raise
         try:
             self._stream.start()
-        except Exception:
+        except Exception as exc:
             # A started stream owns the device; a half-open one that failed to
             # start would hold the mixer claim forever and make the next attempt
             # look like "something else is already using the speaker".
             self.close()
-            raise
+            raised = unavailable(selection, exc)
+            if raised is exc:
+                raise
+            raise raised from exc
         return self._stream
 
     def close(self) -> None:

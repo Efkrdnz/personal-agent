@@ -47,6 +47,7 @@ __all__ = [
     "AmbiguousDevice",
     "AudioStackMissing",
     "ClockSplit",
+    "DeviceUnavailable",
     "DeviceError",
     "DeviceInfo",
     "DeviceProbe",
@@ -60,6 +61,7 @@ __all__ = [
     "same_hardware",
     "select_duplex_device",
     "stream_delay_ms",
+    "unavailable",
     "usable_devices",
 ]
 
@@ -90,6 +92,10 @@ class NotDuplex(DeviceError):
 
 class ClockSplit(DeviceError):
     """Capture and render resolved to different devices. See the module docstring."""
+
+
+class DeviceUnavailable(DeviceError):
+    """The device is there and would not open: another program holds it, or it went mid-start."""
 
 
 @dataclass(frozen=True)
@@ -510,12 +516,30 @@ def open_duplex_stream(
     single output and would turn rule 2 into a race.
     """
     sd = PortAudioProbe._sd()
-    return sd.Stream(
-        device=selection.pair,
-        samplerate=selection.samplerate,
-        blocksize=block,
-        dtype="int16",
-        channels=channels,
-        callback=callback,
-        latency="low",
+    try:
+        return sd.Stream(
+            device=selection.pair,
+            samplerate=selection.samplerate,
+            blocksize=block,
+            dtype="int16",
+            channels=channels,
+            callback=callback,
+            latency="low",
+        )
+    except Exception as exc:
+        raise unavailable(selection, exc) from exc
+
+
+def unavailable(selection: DeviceSelection, exc: BaseException) -> BaseException:
+    """``exc`` as a :class:`DeviceUnavailable` when PortAudio refused the device, else itself.
+
+    A PortAudioError is a fact about the device (in use, unplugged), so it is
+    a refusal the user can fix by picking another; anything else is a bug and
+    stays one. By name, because the type lives in a module that may not load.
+    """
+    if type(exc).__name__ != "PortAudioError":
+        return exc
+    return DeviceUnavailable(
+        f"{selection.describe()} would not open ({exc}). Another program may be using "
+        "it, or it was unplugged; pick another microphone in Settings."
     )

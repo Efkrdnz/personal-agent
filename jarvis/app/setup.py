@@ -462,7 +462,11 @@ class SetupService:
         with self._wake_lock:
             if _quietly(lambda: self._wake_ready(word), False):
                 said = "The wake-word model is already here."
-                restarted: list[str] = []
+                # Already here, but a desk that started before it landed is
+                # still held waiting for it; the button is how it is woken.
+                restarted: list[str] = (
+                    self._restart_names(("desk",), restart) if self._desk_held() else []
+                )
             else:
                 try:
                     said = self._download_wake(word) or "The wake-word model is in place."
@@ -539,6 +543,14 @@ class SetupService:
 
     def _restart(self, secret: str, enabled: bool) -> list[str]:
         return self._restart_names(_SECRET_RESTARTS.get(secret, ()), enabled)
+
+    def _desk_held(self) -> bool:
+        """Whether the supervisor is holding the desk after a refusal. False when unknown."""
+        if self._control is None:
+            return False
+        processes = _quietly(self._control.status, None)
+        desk = processes.get("desk") if isinstance(processes, Mapping) else None
+        return bool(isinstance(desk, Mapping) and desk.get("held"))
 
     def _restart_names(self, names: tuple[str, ...], enabled: bool) -> list[str]:
         """Restart each that exists; report the ones that did. Never raises.

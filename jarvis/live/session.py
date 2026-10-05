@@ -75,6 +75,7 @@ __all__ = [
     "ToolCall",
     "ToolRegistry",
     "ToolResponse",
+    "key_refused",
     "ToolResult",
     "Usage",
     "record_session_time",
@@ -93,6 +94,40 @@ class LiveUnavailable(RuntimeError):
 
 class LiveDown(RuntimeError):
     """The reconnect budget is exhausted. The conversation is over, say so."""
+
+
+#: What Gemini says when it refuses the key itself. Matched as text, because
+#: no one status code means it: the Live API closes the socket (1007, 1008)
+#: with the reason in the close frame, the REST API answers 400 or 403.
+_KEY_REFUSED = ("api key not valid", "api_key_invalid", "api key expired", "permission_denied")
+
+
+def key_refused(exc: BaseException) -> str | None:
+    """Gemini's own words when ``exc``, or what caused it, is the API key being refused.
+
+    None for everything else. The difference decides what the app does: a
+    refused key is held until the user pastes a new one, while a network
+    that is down is retried, and retrying a refused key forever says nothing.
+    """
+    seen: set[int] = set()
+    e: BaseException | None = exc
+    while e is not None and id(e) not in seen:
+        seen.add(id(e))
+        text = str(e)
+        if getattr(e, "code", None) in (401, 403) or any(m in text.lower() for m in _KEY_REFUSED):
+            # The SDK's own message where it has one: "1007 None. API key not
+            # valid" is its str(), and the user is shown this.
+            said = next(
+                (
+                    v
+                    for v in (getattr(e, "message", None), getattr(e, "details", None))
+                    if isinstance(v, str) and v
+                ),
+                text,
+            )
+            return " ".join(str(said).split())[:200]
+        e = e.__cause__ or e.__context__
+    return None
 
 
 class NotConnected(RuntimeError):

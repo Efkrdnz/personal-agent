@@ -155,3 +155,20 @@ def test_every_world_tool_is_offered_everywhere() -> None:
     for channel in ("desk", "telegram", "phone", "cli"):
         for name in ("weather", "where_am_i", "local_time"):
             assert name in reg.names(channel), (name, channel)
+
+
+def test_the_time_here_is_in_the_configured_zone_not_the_process_one(
+    con: sqlite3.Connection, db: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The app's Settings change [tz]; the desk's process environment stays
+    # what it was. "What time is it" must follow the setting, as reminders do.
+    monkeypatch.setenv("JARVIS_TZ", "Pacific/Kiritimati")  # UTC+14
+    c = ctx(con, Locator(db_path=db, fetch=FakeNet({})))
+    c.extra["tz"] = "Pacific/Midway"  # UTC-11: a day apart, never the same hour
+    said = world.local_time(c)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    want = datetime.now(ZoneInfo("Pacific/Midway"))
+    assert f"{want:%H:%M}" in said or f"{want:%A}" in said
+    assert f"on {want:%A}" in said

@@ -978,3 +978,55 @@ async def test_the_spoken_ordinal_wins_over_a_number_the_caller_brought() -> Non
 
     await session.close()
     await task
+
+
+# ───────────────────────── a refused key is not a bad minute ─────────────────────────
+
+
+def _down_because(code: int, reason: str) -> BaseException:
+    from google.genai import errors
+
+    from jarvis.live.session import LiveDown
+
+    try:
+        try:
+            errors.APIError.raise_error(code, reason, None)
+        except Exception as exc:
+            raise LiveDown("5 consecutive connect failures for profile 'desk'") from exc
+    except LiveDown as down:
+        return down
+    raise AssertionError("unreachable")
+
+
+def test_a_refused_key_is_recognised_through_the_reconnect_budget() -> None:
+    pytest.importorskip("google.genai")
+    from jarvis.live.session import key_refused
+
+    said = key_refused(_down_because(1007, "API key not valid. Please pass a valid API key."))
+    assert said == "API key not valid. Please pass a valid API key."
+
+
+@pytest.mark.parametrize(
+    ("code", "reason"),
+    [(1011, "Internal error encountered."), (1006, "Abnormal closure."), (1008, "Not found.")],
+)
+def test_a_server_or_network_failure_is_not_a_refused_key(code: int, reason: str) -> None:
+    pytest.importorskip("google.genai")
+    from jarvis.live.session import key_refused
+
+    assert key_refused(_down_because(code, reason)) is None
+    assert key_refused(OSError("[Errno 11001] getaddrinfo failed")) is None
+
+
+def test_the_desk_holds_a_refused_key_and_retries_the_rest() -> None:
+    import ast
+
+    from jarvis import __main__ as cli
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    desk = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "cmd_desk"
+    )
+    src = ast.unparse(desk)
+    assert "except LiveDown" in src and "key_refused(exc)" in src
+    assert "'secret:gemini_api_key'" in src

@@ -577,6 +577,20 @@ def test_a_model_already_here_is_not_fetched_again(svc: SetupService, fakes: Fak
     assert "already" in reply["message"]
 
 
+def test_a_model_already_here_still_wakes_a_desk_held_waiting_for_it(
+    make: Build, fakes: Fakes
+) -> None:
+    # The desk restarted before the background download finished and is held
+    # on "no wake model"; the card's button is how the user wakes it.
+    class Control:
+        def status(self) -> dict[str, Any]:
+            return {"desk": {"running": False, "held": True, "reason": "no wake model"}}
+
+    fakes.ready["hey_jarvis"] = True
+    reply = make(control=Control()).download_wake()
+    assert fakes.downloads == [] and reply["restarted"] == ["desk"]
+
+
 def test_no_wake_word_downloads_nothing(svc: SetupService, fakes: Fakes, cfg_path: Path) -> None:
     cfgmod.save_setting("voice.wake_word", "", cfg_path)
     assert "listens all the time" in svc.download_wake()["message"]

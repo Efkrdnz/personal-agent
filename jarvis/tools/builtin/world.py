@@ -69,7 +69,7 @@ def where_am_i(ctx: ToolCtx) -> str:
     return (
         f"Going by your internet address, you're in or near {here.name}{region}, "
         f"{here.country or 'somewhere'}{radius}. A VPN or a mobile connection can move "
-        "that a long way — set your city in config.toml if it's wrong."
+        "that a long way — set your city in Settings if it's wrong."
     )
 
 
@@ -82,16 +82,31 @@ def _zone(p: Place) -> ZoneInfo:
     return local_tz()
 
 
+def _here(ctx: ToolCtx) -> ZoneInfo:
+    """The user's zone: the configured one the caller put in ``ctx.extra``, else the process's.
+
+    The same order as the reminder tools use, so "what time is it" and "remind
+    me at 6" cannot disagree about which six o'clock.
+    """
+    name = ctx.extra.get("tz")
+    if isinstance(name, str) and name:
+        try:
+            return ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            pass
+    return local_tz()
+
+
 def local_time(ctx: ToolCtx, place: str = "") -> str:
     """The time and date here, or in a named place."""
     if not place.strip():
-        now = datetime.now(local_tz())
+        now = datetime.now(_here(ctx))
         return f"It's {now:%H:%M} on {now:%A} the {now.day}{_ordinal(now.day)}."
     where = _resolve(ctx, place)
     if not where.timezone:
         raise ToolError(f"I found {where.label} but not its time zone.")
     there = datetime.now(_zone(where))
-    here = datetime.now(local_tz())
+    here = datetime.now(_here(ctx))
     offset = there.utcoffset() - here.utcoffset()  # type: ignore[operator]
     hours = offset.total_seconds() / 3600
     if abs(hours) < 0.01:

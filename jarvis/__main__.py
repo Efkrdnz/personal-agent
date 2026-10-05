@@ -49,7 +49,7 @@ import sqlite3
 import subprocess
 import sys
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -1331,12 +1331,16 @@ def build_window_services(
     control: Any | None = None,
     setup: Any | None = None,
     late_key: bool = False,
+    reload: Any | None = None,
 ) -> Any:
     """Everything the window server can do, for ``window`` and ``app`` alike. Wiring only.
 
     ``late_key`` is the app's: its first-run screen stores the Gemini key AFTER
-    the window is up, and a chat built with the key the process started with
-    would stay off until the user found out they had to restart.
+    the window is up, and its Settings change the key, the city and the form
+    of address while the window stays up. So the app's chat and tool context
+    are re-read from ``reload()`` (the config as it is now) and the keyring
+    on every use, and rebuilt when either changed; built once, they would
+    answer with what was true at launch until the user restarted.
     """
     from jarvis.tools.default import registry
     from jarvis.window.server import Services
@@ -1352,12 +1356,15 @@ def build_window_services(
     extra = tool_extra(cfg, key)
     redactor = desk_redactor()
     chat, chat_why = _window_chat(cfg, key, db_path, reg, extra, notes_paragraph)
-    if chat is None and late_key and _installed("google.genai"):
-        chat, chat_why = _late_chat(cfg, db_path, reg, extra, notes_paragraph), ""
+    tools_extra: Any = extra
+    if late_key and _installed("google.genai"):
+        now = _as_of_now(reload or (lambda: cfg))
+        chat, chat_why = _late_chat(now, db_path, reg, notes_paragraph), ""
+        tools_extra = _ExtraNow(now)
     return Services(
         open_db=lambda: db.connect(db_path),
         registry=reg,
-        extra=extra,
+        extra=tools_extra,
         chat=chat,
         chat_why=chat_why,
         speak=_window_speaker(cfg, db_path, redactor=redactor),
@@ -1462,25 +1469,59 @@ def _window_chat(
     return send, ""
 
 
-def _late_chat(
-    cfg: cfgmod.Config,
-    db_path: str | None,
-    reg: Any,
-    extra: dict[str, Any],
-    notes_paragraph: str,
-) -> Any:
-    """The window's chat, built on the first message sent after a key exists."""
+def _as_of_now(reload: Any) -> Any:
+    """``now() -> (cfg, key, extra)``, rebuilt only when the config or the key changed."""
+    import hashlib
+
+    last: dict[str, Any] = {}
+
+    def now() -> tuple[cfgmod.Config, str | None, dict[str, Any]]:
+        cfg = reload()
+        key = secrets.get("gemini_api_key")
+        # A digest, not the key: this dict outlives the call.
+        sig = (cfg, hashlib.sha256((key or "").encode("utf-8")).hexdigest())
+        if last.get("sig") != sig:
+            last.update(sig=sig, extra=tool_extra(cfg, key))
+        return cfg, key, last["extra"]
+
+    return now
+
+
+class _ExtraNow(Mapping[str, Any]):
+    """The tools' ``ctx.extra`` as of the current settings and key. A view, read per call."""
+
+    def __init__(self, now: Any) -> None:
+        self._now = now
+
+    def _current(self) -> dict[str, Any]:
+        return self._now()[2]
+
+    def __getitem__(self, key: str) -> Any:
+        return self._current()[key]
+
+    def __iter__(self) -> Any:
+        return iter(self._current())
+
+    def __len__(self) -> int:
+        return len(self._current())
+
+
+def _late_chat(now: Any, db_path: str | None, reg: Any, notes_paragraph: str) -> Any:
+    """The app window's chat, rebuilt whenever the key or the settings it was built from change.
+
+    A rebuild starts a new conversation; it happens only when the user has
+    just changed what Jarvis is (its key, its city, how it addresses them).
+    """
     built: dict[str, Any] = {}
 
     def send(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
-        # The server serialises chat calls, so building once here cannot race.
-        if "chat" not in built:
-            chat, _ = _window_chat(
-                cfg, secrets.get("gemini_api_key"), db_path, reg, extra, notes_paragraph
-            )
+        # The server serialises chat calls, so rebuilding here cannot race.
+        cfg, key, extra = now()
+        if built.get("from") is not extra or "chat" not in built:
+            chat, _ = _window_chat(cfg, key, db_path, reg, extra, notes_paragraph)
             if chat is None:
                 raise RuntimeError("I need the Gemini key before I can chat; it goes in Settings.")
-            built["chat"] = chat
+            built.update({"from": extra, "chat": chat})
         return built["chat"](text)
 
     return send
@@ -2130,7 +2171,7 @@ def _refused(db_path: str | None, sentence: str, action: str | None) -> int:
 def cmd_desk(args: argparse.Namespace) -> int:
     import asyncio
 
-    from jarvis.live.session import LiveUnavailable
+    from jarvis.live.session import LiveDown, LiveUnavailable, key_refused
 
     try:
         desk = _build_desk(args)
@@ -2224,6 +2265,17 @@ def cmd_desk(args: argparse.Namespace) -> int:
         print("\nstopped.")
     except LiveUnavailable as exc:
         return _refused(args.db, str(exc), None)
+    except LiveDown as exc:
+        if said := key_refused(exc):
+            return _refused(
+                args.db,
+                f"Gemini turned down the API key ({said}). Paste a new one in Settings.",
+                "secret:gemini_api_key",
+            )
+        # Anything else is the network or Gemini having a bad minute: exit 1,
+        # which the app retries with a backoff, with this as the reason shown.
+        print(f"I can't reach Gemini right now ({exc}); I'll try again.", file=sys.stderr)
+        return 1
     except DeviceError as exc:
         # Opening the stream is the last step of starting, so a device that
         # will not open is a refusal like any other: held, not crash-looped.
@@ -2302,6 +2354,7 @@ def _run_app(args: argparse.Namespace) -> int:
         control=control,
         setup=_setup_service(cfg, args, supervisor, control),
         late_key=True,
+        reload=lambda: _config_or(cfg, args.config),
     )
     server = instance.bind_remembered(lambda port: make_server(services, port=port))
     server.start()
@@ -2339,6 +2392,18 @@ def _run_app(args: argparse.Namespace) -> int:
         supervisor.stop()
         server.shutdown()
     return 0
+
+
+def _config_or(fallback: cfgmod.Config, path: str | None) -> cfgmod.Config:
+    """The config as it is on disk now, or ``fallback`` while the file is broken.
+
+    The settings screen says what is wrong with a broken file; until it is
+    fixed, the window keeps working with what it had.
+    """
+    try:
+        return cfgmod.load(path)
+    except (ValueError, OSError):
+        return fallback
 
 
 def _setup_service(

@@ -62,8 +62,10 @@ class NoDatabase(GeoUnavailable):
 
     def __init__(self, path: Path) -> None:
         super().__init__(
-            f"I don't have a location database at {path}. Run `python -m jarvis geo update` "
-            "with a free MaxMind licence key, or set your city in config.toml under [location]."
+            "I don't know where you are: no city is set and there is no location database "
+            f"at {path}. Set the city in the Jarvis window's Settings (or config.toml under "
+            "[location]), or ask about a place by name. `python -m jarvis geo update` "
+            "installs the database, with a free MaxMind licence key."
         )
         self.path = path
 

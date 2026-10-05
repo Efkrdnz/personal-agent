@@ -26,7 +26,7 @@ from typing import IO
 
 from jarvis.app import paths
 
-__all__ = ["CHILDREN", "main", "redirect_missing_streams", "run_module"]
+__all__ = ["CHILDREN", "main", "redirect_missing_streams", "run_module", "tune_piped_streams"]
 
 
 # Each import is inside its function: the scheduler should not pay for loading
@@ -87,6 +87,31 @@ def redirect_missing_streams(*, env: Mapping[str, str] | None = None) -> IO[str]
     return stream
 
 
+def tune_piped_streams() -> None:
+    """UTF-8 and a flush per line for output that goes to a pipe or a file.
+
+    The supervisor asks for that through PYTHONIOENCODING and PYTHONUNBUFFERED,
+    which a frozen build ignores: its interpreter does not read PYTHON*
+    variables. Without this a child's last lines before it is stopped sit in
+    an 8 KB buffer that never reaches its log, in the Windows code page.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if stream is None or _isatty(stream):
+            continue
+        with suppress(Exception):
+            stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)  # type: ignore[union-attr]
+    if not faulthandler.is_enabled() and sys.stderr is not None:
+        with suppress(Exception):
+            faulthandler.enable(sys.stderr)
+
+
+def _isatty(stream: IO[str]) -> bool:
+    try:
+        return stream.isatty()
+    except Exception:  # noqa: BLE001 - a closed or odd stream is not a terminal
+        return False
+
+
 def run_module(args: Sequence[str]) -> int:
     """``-m <module> [args...]``, from the table."""
     if not args:
@@ -113,9 +138,20 @@ def main(
     # this is what sends it to its target instead of starting a second app.
     multiprocessing.freeze_support()
     redirect_missing_streams()
+    tune_piped_streams()
     args = list(sys.argv[1:] if argv is None else argv)
     if args[:1] == ["-m"]:
-        return run_module(args[1:])
+        try:
+            return run_module(args[1:])
+        except (SystemExit, KeyboardInterrupt):
+            raise
+        except Exception:  # noqa: BLE001 - the log and the exit code are the report
+            # Escaping, it would reach the windowed bootloader, whose answer is
+            # a modal dialog: the child then waits behind it forever, so the
+            # supervisor never sees it exit, never restarts it and never says
+            # why. The traceback goes to the log the window points at instead.
+            traceback.print_exc()
+            return 1
     try:
         return _jarvis(["app", *args])
     except (SystemExit, KeyboardInterrupt):

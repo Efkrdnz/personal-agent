@@ -220,7 +220,7 @@
     setup: null,
     setupAvailable: null,
     tzFilled: false,
-    ob: { open: false, step: "key", wake: "idle", wakeMsg: "" },
+    ob: { open: false, step: "key", wake: "idle", wakeMsg: "", unapplied: false },
     orbAction: null,
     deskKnown: false,
   };
@@ -1965,6 +1965,9 @@
   // happens because of it (a restart, a "next time").
   async function saveSetting(key, value, { restart = true, quiet = false } = {}) {
     const data = await api(API.setupSetting, { key, value, restart });
+    // Onboarding saves without restarting and restarts once at the end; a
+    // dialog closed before the end must still restart, or nothing is used.
+    if (!restart) app.ob.unapplied = true;
     const line = savedLine(data);
     if (!quiet && line !== "Saved.") toast(line, { head: "Settings" });
     return data;
@@ -2067,6 +2070,7 @@
     }
     const data = await withBusy(button, () => api(API.setupSecret, { name, value, restart }));
     if (!data) return false;
+    if (!restart) app.ob.unapplied = true;
     const r = Array.isArray(data.restarted) && data.restarted.length;
     toast(r ? "Stored in the keyring. Restarting what uses it." : "Stored in the keyring.", { head: "Keys" });
     await loadSetup();
@@ -2194,6 +2198,24 @@
     dom.obKey.value = "";
     dom.app.removeAttribute("inert");
     writeStore("sessionStorage", ONBOARD_KEY, "1");
+    // "Later" and Escape end here too, after a key or a microphone may have
+    // been saved: without a restart the voice keeps refusing for a reason
+    // the user has already fixed.
+    if (app.ob.unapplied) restartVoice();
+  }
+
+  async function restartVoice() {
+    app.ob.unapplied = false;
+    if (!app.inApp) return;
+    try {
+      await api(API.appRestart, { process: "desk" });
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401)) {
+        toast(appText(err && err.message, "I couldn't restart my voice."), { tone: "bad", head: "Voice" });
+      }
+    }
+    await loadApp().catch(() => {});
+    scheduleAppRefresh();
   }
 
   function goStep(step) {
@@ -2323,6 +2345,10 @@
       const data = await api(API.setupWake, { restart: false });
       app.ob.wake = "ready";
       app.ob.wakeMsg = data.message || "";
+      // Finished after the dialog did: the voice was restarted without the
+      // model and is waiting for it, so it is restarted again now.
+      if (!app.ob.open) restartVoice();
+      else app.ob.unapplied = true;
     } catch (err) {
       app.ob.wake = "failed";
       app.ob.wakeMsg = appText(err && err.message, "I couldn't fetch it.");
@@ -2390,6 +2416,7 @@
     if (app.inApp) {
       const data = await withBusy(dom.obNext, () => api(API.appRestart, { process: "desk" }));
       if (!data) return;
+      app.ob.unapplied = false;
       toast(`At your service, ${chosenAddress()}.`, { head: "Jarvis" });
     } else {
       toast("Saved. Restart the desk to use it.", { head: "Setup" });

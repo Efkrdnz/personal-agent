@@ -351,3 +351,51 @@ def test_the_false_barge_in_count_runs_the_whole_duck_confirm_chain() -> None:
     speech = (np.sin(np.arange(rate * 2) * 0.2) * 9000).astype(np.int16)
     starts, _ = count_false_barge_ins(speech, silence, rate=rate)
     assert starts == 1, "a real voice into a silent room IS a turn, not a false positive"
+
+
+class PortAudioError(Exception):
+    """Named like sounddevice's, which is how the leg recognises it."""
+
+
+def test_a_device_another_program_holds_is_a_refusal_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Held, with a sentence and a "pick another microphone" button, rather
+    # than a crash the app would restart every minute for ever.
+    from jarvis.audio.devices import DeviceUnavailable
+
+    class Busy(FakeStream):
+        def start(self) -> None:
+            raise PortAudioError("Error starting stream: Device unavailable [-9985]")
+
+    graph = graph_for(DEV_RATE, BLOCK)
+    leg = DeskLeg(probe=FakeProbe([HEADSET], (0, 0)))
+    with pytest.raises(DeviceUnavailable, match="another microphone") as exc:
+        open_capturing(leg, graph, monkeypatch, stream=Busy())
+    assert "Device unavailable" in str(exc.value)
+    graph.mixer.claim_output("retry").release()  # the claim was given back
+
+
+def test_a_device_that_will_not_even_open_gives_the_claim_back_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jarvis.audio.devices import DeviceUnavailable
+
+    def refuse(selection, callback, *, block=BLOCK, channels=1):
+        from jarvis.audio.devices import unavailable
+
+        raise unavailable(selection, PortAudioError("Error opening Stream"))
+
+    graph = graph_for(DEV_RATE, BLOCK)
+    leg = DeskLeg(probe=FakeProbe([HEADSET], (0, 0)))
+    monkeypatch.setattr("jarvis.audio.legs.open_duplex_stream", refuse)
+    with pytest.raises(DeviceUnavailable):
+        leg.open(graph)
+    graph.mixer.claim_output("retry").release()
+
+
+def test_any_other_failure_stays_what_it_was() -> None:
+    from jarvis.audio.devices import unavailable
+
+    bug = KeyError("a bug, not a device")
+    assert unavailable(DeskLeg(probe=FakeProbe([HEADSET], (0, 0))).select(), bug) is bug

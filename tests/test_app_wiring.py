@@ -850,3 +850,50 @@ def test_the_icon_is_an_arc_reactor_at_every_size() -> None:
     assert img.getpixel((0, 0))[3] == 0, "the corners are transparent"
     r, g, b, a = img.getpixel((32, 32))
     assert a == 255 and min(r, g, b) > 200, "the core is bright"
+
+
+def test_the_app_chat_follows_the_key_and_the_settings_as_they_change(
+    home: Path, dbpath: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Onboarding stores the key after the window is up; Settings then change
+    # the city and the form of address. A chat built once would answer with
+    # what was true at launch until the user restarted the app.
+    from jarvis.live import chat as chatmod
+
+    built: list[tuple[str, str]] = []
+
+    class FakeChat:
+        def __init__(self, **kw: Any) -> None:
+            built.append((kw["api_key"], kw["system_instruction"]))
+
+        def send(self, text: str) -> Any:
+            from jarvis.live.chat import ChatTurn
+
+            return ChatTurn(text="very good")
+
+    monkeypatch.setattr(chatmod, "GeminiChat", FakeChat)
+    current = {"cfg": Config(persona=Persona(address="sir"))}
+    services = cli.build_window_services(
+        current["cfg"], str(dbpath), late_key=True, reload=lambda: current["cfg"]
+    )
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "first-key")
+    services.chat("hello")
+    services.chat("again")
+    assert [k for k, _ in built] == ["first-key"], "unchanged settings keep the conversation"
+    assert "search" in dict(services.extra), "a key stored after launch turns web search on"
+
+    current["cfg"] = Config(persona=Persona(address="ma'am"))
+    services.chat("hello")
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "replaced-key")
+    services.chat("hello")
+    assert [k for k, _ in built] == ["first-key", "first-key", "replaced-key"]
+    assert "ma'am" in built[1][1] and "sir" in built[0][1]
+
+
+def test_the_app_passes_the_config_as_it_is_now() -> None:
+    call = next(
+        n
+        for n in ast.walk(_fn("_run_app"))
+        if isinstance(n, ast.Call) and _called(n) == "build_window_services"
+    )
+    assert {"late_key", "reload"} <= {k.arg for k in call.keywords}

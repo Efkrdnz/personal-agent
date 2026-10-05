@@ -248,3 +248,53 @@ def test_off_windows_there_is_no_dialog_to_show(monkeypatch: pytest.MonkeyPatch)
     assert entry._default_alert() is None
     monkeypatch.setattr(sys, "platform", "win32")
     assert callable(entry._default_alert())
+
+
+def test_a_child_that_crashes_exits_with_its_traceback_in_the_log(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Escaping, the exception would reach the windowed bootloader, whose
+    # dialog keeps the child alive behind it: never reaped, never restarted.
+    from jarvis.schedule import __main__ as sched
+
+    def broken(argv: list[str]) -> int:
+        raise ConnectionError("Gemini could not be reached")
+
+    shown: list[Any] = []
+    monkeypatch.setattr(sched, "main", broken)
+    assert entry.main(["-m", "jarvis.schedule"], alert=lambda *a: shown.append(a)) == 1
+    assert shown == []
+    err = capsys.readouterr().err
+    assert "ConnectionError: Gemini could not be reached" in err and "Traceback" in err
+
+
+def test_a_child_exit_code_and_usage_errors_pass_straight_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from jarvis.schedule import __main__ as sched
+
+    monkeypatch.setattr(sched, "main", lambda argv: 2)
+    assert entry.main(["-m", "jarvis.schedule"]) == 2
+
+    def usage(argv: list[str]) -> int:
+        raise SystemExit(2)
+
+    monkeypatch.setattr(sched, "main", usage)
+    with pytest.raises(SystemExit):
+        entry.main(["-m", "jarvis.schedule", "--bogus"])
+
+
+def test_a_piped_child_writes_utf8_a_line_at_a_time(tmp_path: Path) -> None:
+    # What a frozen child needs and cannot get from PYTHONIOENCODING or
+    # PYTHONUNBUFFERED, which a frozen interpreter does not read.
+    code = (
+        "import sys; from jarvis.app import entry; "
+        "sys.stdout.reconfigure(encoding='cp1252', line_buffering=False); "
+        "entry.tune_piped_streams(); "
+        "print(sys.stdout.encoding, sys.stdout.line_buffering); print('Gün aydın — sir')"
+    )
+    env = {k: v for k, v in __import__("os").environ.items() if not k.startswith("PYTHONIO")}
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, cwd=ROOT, env=env, timeout=60, check=True
+    ).stdout.decode("utf-8")
+    assert out.splitlines() == ["utf-8 True", "Gün aydın — sir"]
