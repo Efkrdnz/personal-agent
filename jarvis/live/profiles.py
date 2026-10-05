@@ -247,7 +247,11 @@ def _instruction(*lines: str) -> str:
 DESK = SessionProfile(
     name="desk",
     system_instruction=_instruction(
-        "You are Jarvis, a voice assistant at the user's desk. Be brief: this is speech.",
+        "You are Jarvis, the user's personal voice assistant at their desk. Be brief: this",
+        "is speech. You are general-purpose: answer questions, give the weather and the time",
+        "anywhere, remember things, set reminders, search the web for anything current, and",
+        "drive Claude Code to build software. Use a tool whenever one fits; never invent a",
+        "tool's result or a fact about the user that is not in your notes.",
         "You are NOT the only voice here. A separate reader voice speaks option labels,",
         "confirmed requirements, and anything that must be word-for-word. When a tool says",
         "something was already read aloud, do not repeat it — refer to it by number.",
@@ -270,6 +274,13 @@ DESK = SessionProfile(
         "local_time",
         "correct_hearing",
         "wrong_correction",
+        "remember",
+        "recall",
+        "forget_note",
+        "remind_me",
+        "list_reminders",
+        "cancel_reminder",
+        "web_search",
     ),
 )
 
@@ -295,6 +306,13 @@ PHONE_USER = SessionProfile(
         "local_time",
         "correct_hearing",
         "wrong_correction",
+        "remember",
+        "recall",
+        "forget_note",
+        "remind_me",
+        "list_reminders",
+        "cancel_reminder",
+        "web_search",
     ),
 )
 

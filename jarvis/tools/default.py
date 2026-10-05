@@ -9,7 +9,7 @@ reviewed the way a permission table should be.
 
 from __future__ import annotations
 
-from jarvis.tools.builtin import answer, code_build, hearing, status, world
+from jarvis.tools.builtin import answer, code_build, general, hearing, status, world
 from jarvis.tools.registry import Registry, Tool
 
 __all__ = ["BUILTIN", "registry"]
@@ -20,6 +20,7 @@ BUILTIN: tuple[Tool, ...] = (
     *status.TOOLS,
     *world.TOOLS,
     *hearing.TOOLS,
+    *general.TOOLS,
 )
 
 

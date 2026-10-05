@@ -153,6 +153,9 @@ def run(
             _say(f"briefing {outcome.occurrence}: {outcome.action}")
         for notice in report.notices:
             _say(f"notice: {notice.line}")
+        for rem in report.reminders:
+            what = f"snoozed to {rem.snoozed_to}" if rem.snoozed_to else rem.request.state
+            _say(f"reminder: {rem.reminder.text} ({what})")
         if once or stop():
             return reports
         sleep(interval_s)

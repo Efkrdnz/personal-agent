@@ -20,6 +20,12 @@ The commands, in the order somebody new to the machine needs them:
     python -m jarvis pending        the questions waiting on you, numbered
     python -m jarvis answer 1 2     answer one, by the numbers you were read
     python -m jarvis desk           listen, talk, and drive Claude Code
+    python -m jarvis chat           the same assistant by text, over the Gemini API
+    python -m jarvis say "..."      speak with the built-in reader voice
+    python -m jarvis weather        the weather here, or somewhere named
+    python -m jarvis geo update     download GeoLite2, for "where am I"
+    python -m jarvis remind         the reminders the scheduler will say
+    python -m jarvis hearing list   the words Jarvis corrects when it mishears you
 
 ``doctor`` is the important one. A voice assistant that fails at startup fails
 with no screen and no log the user will find, so the whole of "why won't it
@@ -429,6 +435,10 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
     cc_why = "" if claude_cli_path() else "no claude CLI (pip install -e '.[cc]')"
     verdict(not cc_why, "python -m jarvis.cc", cc_why)
     verdict(not cc_why, "python -m jarvis run", cc_why)
+    chat_why = "" if have.get("gemini_api_key") else "no gemini_api_key"
+    if not chat_why and not _installed("google.genai"):
+        chat_why = "google-genai is not installed (pip install -e '.[live]')"
+    verdict(not chat_why, "python -m jarvis chat", chat_why)
     build_why = "" if have.get("gemini_api_key") else "no gemini_api_key (it tidies your words)"
     r.add(
         OK if not build_why else WARN,
@@ -441,7 +451,7 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
     r.add(OK if not tg_why else WARN, f"{'python -m jarvis.telegram':<28} {tail}")
     r.add(
         OK,
-        f"{'python -m jarvis.schedule':<28} — arms the 10am gate AND routes questions to channels",
+        f"{'python -m jarvis.schedule':<28} — the 10am gate, reminders, and routing questions",
     )
     del cfg
 
@@ -579,13 +589,19 @@ def locator_for(cfg: cfgmod.Config) -> Any:
     )
 
 
-def tool_extra(cfg: cfgmod.Config) -> dict[str, Any]:
+def tool_extra(cfg: cfgmod.Config, api_key: str | None = None) -> dict[str, Any]:
     """What every channel's tools get in ``ctx.extra``. One place, so they cannot differ."""
-    return {
+    extra: dict[str, Any] = {
         "spend_threshold_usd": cfg.spend_threshold_usd,
         "locator": locator_for(cfg),
         "units": cfg.location.units,
+        "tz": cfg.tz,
     }
+    if api_key and cfg.voice.web_search and _installed("google.genai"):
+        from jarvis.live.text import GeminiSearch
+
+        extra["search"] = GeminiSearch(api_key=api_key, model=cfg.voice.text_model)
+    return extra
 
 
 def hearing_for(cfg: cfgmod.Config, api_key: str | None = None) -> Any:
@@ -610,12 +626,25 @@ def hearing_for(cfg: cfgmod.Config, api_key: str | None = None) -> Any:
     return hear
 
 
-def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any:
-    """A Live profile that knows this user's mishearings, in its model and its ears.
+def remembered(con: sqlite3.Connection) -> str:
+    """The user's notes, as a paragraph any model's instructions can carry."""
+    from jarvis import memory
 
-    Two different listeners: the recogniser gets ``custom_vocabulary`` so it
-    writes "quote" in the first place, and the conversational model, which
-    hears the AUDIO rather than any transcript, gets the same list in words.
+    facts = [n.text for n in memory.notes(con)]
+    if not facts:
+        return ""
+    return "What the user has asked you to remember (their words, newest first):\n" + "\n".join(
+        f"- {f}" for f in facts
+    )
+
+
+def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any:
+    """A Live profile that knows this user: their mishearings, and their notes.
+
+    Two different listeners for the mishearings: the recogniser gets
+    ``custom_vocabulary`` so it writes "quote" in the first place, and the
+    conversational model, which hears the AUDIO rather than any transcript,
+    gets the same list in words.
     """
     from dataclasses import replace
 
@@ -627,7 +656,9 @@ def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any
         prof,
         model=cfg.voice.model,
         voice=cfg.voice.gemini_voice,
-        system_instruction="\n".join(x for x in (prof.system_instruction, told) if x),
+        system_instruction="\n\n".join(
+            x for x in (prof.system_instruction, told, remembered(con)) if x
+        ),
         vocabulary=hearing.vocabulary(lex) if cfg.voice.asr_vocabulary else (),
         language_codes=tuple(cfg.voice.languages),
     )
@@ -939,6 +970,19 @@ def cmd_answer(args: argparse.Namespace) -> int:
 # ───────────────────────────── say ─────────────────────────────
 
 
+def _play(pcm: bytes, rate: int) -> str | None:
+    """Play PCM16 mono on the default device. None, or the sentence saying why not."""
+    try:
+        import numpy as np
+        import sounddevice as sd
+
+        sd.play(np.frombuffer(pcm, dtype="<i2"), rate)
+        sd.wait()
+    except Exception as exc:  # noqa: BLE001 - no PortAudio, no device: say where to look instead
+        return f"couldn't play it ({exc})"
+    return None
+
+
 def cmd_say(args: argparse.Namespace) -> int:
     """Speak a sentence with the reader's ladder — to the speakers, or to a WAV file."""
     import asyncio
@@ -971,16 +1015,95 @@ def cmd_say(args: argparse.Namespace) -> int:
             w.writeframes(pcm)
         print(f"wrote {args.out} ({len(pcm) / (RATE * 2):.1f}s)")
         return 0
-    try:
-        import numpy as np
-        import sounddevice as sd
-
-        sd.play(np.frombuffer(pcm, dtype="<i2"), RATE)
-        sd.wait()
-    except Exception as exc:  # noqa: BLE001 - no PortAudio, no device: say where to look instead
-        print(f"couldn't play it ({exc}); use --out speech.wav", file=sys.stderr)
+    if why := _play(pcm, RATE):
+        print(f"{why}; use --out speech.wav", file=sys.stderr)
         return 1
     return 0
+
+
+# ───────────────────────────── chat ─────────────────────────────
+
+
+def cmd_chat(args: argparse.Namespace) -> int:
+    """Talk to Jarvis by text over the Gemini API, with every tool the desk has."""
+    import asyncio
+
+    from jarvis.live.chat import GeminiChat, persona
+    from jarvis.live.text import TextCallFailed
+    from jarvis.tools.ctx import ToolCtx
+    from jarvis.tools.default import registry
+
+    cfg = cfgmod.load(args.config)
+    try:
+        key = secrets.require("gemini_api_key")
+    except secrets.MissingSecret as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if not _installed("google.genai"):
+        print("google-genai is not installed: pip install -e '.[live]'", file=sys.stderr)
+        return 2
+
+    con = db.open_db(args.db)
+    reg = registry()
+    ctx = ToolCtx(con=con, channel="cli", actor="cli", extra=tool_extra(cfg, key))
+    chat = GeminiChat(
+        api_key=key,
+        model=cfg.voice.text_model,
+        declarations=reg.declarations("cli"),
+        dispatch=lambda name, a: reg.dispatch(name, a, ctx),
+        system_instruction=persona(extra=remembered(con)),
+    )
+    speaker = None
+    if args.speak:
+        from jarvis.voice.verbatim import VerbatimSpeaker
+
+        ladder = reader_engines(cfg)
+        speaker = VerbatimSpeaker(engines=tuple(ladder)) if ladder else None
+        if speaker is None:
+            print(f"{WARN}  no voice to speak with; `sudo apt install espeak-ng`", file=sys.stderr)
+
+    def turn(text: str) -> int:
+        try:
+            out = chat.send(text)
+        except TextCallFailed as exc:
+            print(f"[gemini] {exc}", file=sys.stderr)
+            return 1
+        for name, said in out.tools:
+            print(f"  [{name}] {said}")
+        print(out.text)
+        if speaker is not None and out.text:
+            from jarvis.voice.engines import RATE
+
+            try:
+                pcm = asyncio.run(speaker.pcm_for(out.text, args.lang, exact=False))
+            except Exception as exc:  # noqa: BLE001 - speech is a bonus on a text channel
+                print(f"[voice] {exc}", file=sys.stderr)
+            else:
+                if why := _play(pcm, RATE):
+                    print(f"[voice] {why}", file=sys.stderr)
+        return 0
+
+    try:
+        if args.message:
+            return turn(" ".join(args.message))
+        print("Jarvis by text. /reset forgets the conversation, /quit or ctrl-d leaves.")
+        while True:
+            try:
+                line = input("you> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 0
+            if not line:
+                continue
+            if line in ("/quit", "/exit"):
+                return 0
+            if line == "/reset":
+                chat.reset()
+                print("(forgotten)")
+                continue
+            turn(line)
+    finally:
+        con.close()
 
 
 # ───────────────────────────── geo and weather ─────────────────────────────
@@ -1036,6 +1159,26 @@ def cmd_weather(args: argparse.Namespace) -> int:
                 "weather", {"place": " ".join(args.place), "when": args.when}, _cli_ctx(con, cfg)
             )
         )
+    finally:
+        con.close()
+    return 0
+
+
+# ───────────────────────────── reminders ─────────────────────────────
+
+
+def cmd_remind(args: argparse.Namespace) -> int:
+    """The reminders the scheduler will say, and a way to take one back."""
+    from jarvis.tools.default import registry
+
+    cfg = cfgmod.load(args.config)
+    con = db.open_db(args.db)
+    try:
+        ctx = _cli_ctx(con, cfg)
+        if args.action == "cancel":
+            print(registry().dispatch("cancel_reminder", {"about": " ".join(args.words)}, ctx))
+        else:
+            print(registry().dispatch("list_reminders", {}, ctx))
     finally:
         con.close()
     return 0
@@ -1390,7 +1533,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         transcript=transcript,
         questions=questions,
         speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
-        extra=tool_extra(cfg),
+        extra=tool_extra(cfg, key),
         hearing=hearing_for(cfg, key),
     )
     if profile.vocabulary:
@@ -1584,6 +1727,17 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("place", nargs="*", help="a place; empty for here")
     w.add_argument("--when", default="now", choices=("now", "today", "tomorrow", "week"))
     w.set_defaults(fn=cmd_weather)
+
+    ch = sub.add_parser("chat", help="talk to Jarvis by text, over the Gemini API")
+    ch.add_argument("message", nargs="*", help="one message; empty for a conversation")
+    ch.add_argument("--speak", action="store_true", help="also say the answers out loud")
+    ch.add_argument("--lang", default="en", help="the language to speak in")
+    ch.set_defaults(fn=cmd_chat)
+
+    rm = sub.add_parser("remind", help="reminders: list, or cancel one")
+    rm.add_argument("action", choices=("list", "cancel"), nargs="?", default="list")
+    rm.add_argument("words", nargs="*", help="cancel: which one")
+    rm.set_defaults(fn=cmd_remind)
 
     h = sub.add_parser("hearing", help="the words Jarvis corrects when it mishears you")
     h.add_argument("action", choices=("list", "test", "teach", "forget"))

@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["TEXT_MODEL", "GeminiArbiter", "GeminiText", "TextCallFailed"]
+__all__ = ["TEXT_MODEL", "GeminiArbiter", "GeminiSearch", "GeminiText", "TextCallFailed"]
 
 #: The text model for tidying. Deliberately NOT ``jarvis.live.MODEL``: that is the
 #: LIVE model, a duplex audio endpoint, and asking it for a JSON document is
@@ -133,3 +133,60 @@ class GeminiArbiter:
         except TextCallFailed:
             return False
         return reply == meant.lower()
+
+
+@dataclass
+class GeminiSearch:
+    """``(query) -> str``: a Google-grounded answer, with where it came from.
+
+    A SEPARATE call rather than ``google_search`` alongside the function
+    declarations of the conversation: whether one request may carry both is a
+    per-model rule that has changed between releases, and a chat that breaks
+    because search was switched on is the wrong trade. One extra round trip,
+    only when the model asks to search.
+    """
+
+    api_key: str
+    model: str = TEXT_MODEL
+    client: Any | None = field(default=None, repr=False)
+    max_sources: int = 3
+
+    def __call__(self, query: str) -> str:
+        client = self.client
+        if client is None:
+            if not self.api_key:
+                raise TextCallFailed("no Gemini credential: pass GeminiSearch(api_key=...)")
+            from google import genai
+
+            client = genai.Client(api_key=self.api_key)
+        from google.genai import types as t
+
+        try:
+            reply = client.models.generate_content(
+                model=self.model,
+                contents=(
+                    "Answer briefly, in two or three spoken sentences, from current web "
+                    f"results: {query}"
+                ),
+                config=t.GenerateContentConfig(tools=[t.Tool(google_search=t.GoogleSearch())]),
+            )
+        except Exception as exc:  # noqa: BLE001 - every SDK failure is one thing to the caller
+            raise TextCallFailed(f"{type(exc).__name__}: {exc}") from exc
+        text = str(getattr(reply, "text", "") or "").strip()
+        if not text:
+            raise TextCallFailed("the search returned no text")
+        sources = _sources(reply)[: self.max_sources]
+        return f"{text} (Sources: {', '.join(sources)}.)" if sources else text
+
+
+def _sources(reply: Any) -> list[str]:
+    """Titles of the pages the answer was grounded on, deduplicated, in order."""
+    out: list[str] = []
+    for cand in getattr(reply, "candidates", None) or ():
+        meta = getattr(cand, "grounding_metadata", None)
+        for chunk in getattr(meta, "grounding_chunks", None) or ():
+            web = getattr(chunk, "web", None)
+            title = getattr(web, "title", None) or getattr(web, "domain", None)
+            if title and title not in out:
+                out.append(str(title))
+    return out

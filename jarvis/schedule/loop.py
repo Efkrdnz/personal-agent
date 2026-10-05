@@ -40,7 +40,7 @@ from jarvis import jobs
 from jarvis import requests as rq
 from jarvis.bus import publish
 from jarvis.ids import now
-from jarvis.schedule import completion, gate, store
+from jarvis.schedule import completion, gate, reminders, store
 from jarvis.schedule.routing import deliver
 
 __all__ = [
@@ -115,6 +115,7 @@ class TickReport:
     expired: tuple[rq.Expiry, ...] = ()
     answers: tuple[gate.GateOutcome, ...] = ()
     notices: tuple[completion.Notice, ...] = ()
+    reminders: tuple[reminders.Fired, ...] = ()
     routed: tuple[RouteReport, ...] = ()
     unknown_handlers: tuple[str, ...] = field(default=())
 
@@ -481,6 +482,10 @@ def tick(
     expired = sweep_expiries(con, actor=actor, now_ts=ts)
     answered = handle_gate_answers(con, actor=actor, now_ts=ts)
     notices = notify_finished(con, actor=actor, now_ts=ts)
+    # Settle BEFORE firing, so a snooze answered this second is a pending
+    # reminder ten minutes out, not a row the fire sweep could see as due.
+    settled = reminders.settle_reminders(con, actor=actor, now_ts=ts)
+    fired_reminders = reminders.fire_reminders(con, actor=actor, now_ts=ts)
     # LAST, and the order is load-bearing. The four sweeps above each raise a
     # request and deliver it in the same breath — including the snoozed gate,
     # which `handle_gate_answers` delivers with `deliver_after` five minutes out.
@@ -492,6 +497,7 @@ def tick(
         expired=tuple(expired),
         answers=tuple(answered),
         notices=tuple(notices),
+        reminders=(*settled, *fired_reminders),
         routed=tuple(routed),
         unknown_handlers=tuple(unknown),
     )
