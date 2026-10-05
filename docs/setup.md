@@ -158,6 +158,34 @@ caller between two processes, not a missing feature:
 - **The desk does not run the builder itself** — after speaking a build request, run
   `python -m jarvis build` to carry it forward.
 
+## The window
+
+```bash
+python -m jarvis window          # opens the HUD in an app window (Edge or Chrome, no address bar)
+python -m jarvis window --no-open   # print the address instead, to open it yourself
+```
+
+The window is its own process. It reads the same database the desk and scheduler write, so start it
+before or after them, in any order. What it shows:
+
+- **The orb**, which follows the desk: asleep, awake, listening, speaking, or "not running".
+- **The conversation**: what you said aloud and what Jarvis said back, live, plus anything you type.
+  Typing uses the same Gemini chat as `python -m jarvis chat`, with every tool. A speaker button on each
+  reply reads it aloud, and the "speak replies" switch does it every time.
+- **Tools** (weather, time anywhere, where am I, web search, remind, remember, say aloud, plus every tool
+  as a form), **Reminders**, **Notes**, **Questions** (answer Claude Code's questions with buttons),
+  **Builds**, and **Hearing**. Ctrl+K opens a command palette.
+- **Running/stopped lights** for the desk, the scheduler and Telegram, and a **STOP** button you hold
+  for a second.
+
+**Speech goes through the desk when it is running**, because only one program may own the speakers
+(otherwise the echo canceller hears sound it was never told about). With the desk off, the window
+speaks itself, with the same reader voice.
+
+**Only this machine can use it.** The server listens on 127.0.0.1 only, and every request must carry a
+secret token that is created at launch and handed to the window in the part of the address the browser
+never sends anywhere. A web page you visit cannot press STOP or answer a question for you.
+
 ## The wake word
 
 The desk starts **asleep**: the microphone is read locally, and nothing is sent to Gemini until it hears

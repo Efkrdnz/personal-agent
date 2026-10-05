@@ -79,7 +79,7 @@ Full versions in [`CONTRIBUTING.md`](CONTRIBUTING.md). The short form:
 3. **Assume the reader is another process, started after you died.** Functions take an open
    `sqlite3.Connection` first and never open one. No module-level mutable state. Races get a test with two
    real connections.
-4. **The spine is standard-library only.** `jarvis/{db,ids,clock,bus,requests,jobs,reconcile,effects,presence,kill,ledger,answers,hearing,memory}.py`
+4. **The spine is standard-library only.** `jarvis/{db,ids,clock,bus,requests,jobs,reconcile,effects,presence,kill,ledger,answers,hearing,memory,liveness}.py`
    must import under `python -S`. `jarvis/cc/` and the voice layer add their own deps behind extras.
 5. **Comments say why, never what.**
 6. **`jarvis/migrations/*.sql` is frozen.** Add a new numbered migration; never edit an applied one.
@@ -101,7 +101,9 @@ jarvis/           the spine — one SQLite file, several processes, stdlib only
   ledger.py       three providers whose units do not reconcile
   secrets.py      keyring first, environment second, a file never
   config.py       settings that are not secrets, and a refusal if one appears
+  liveness.py     which processes are running, as heartbeat rows in `cursors`
 jarvis/tools/     what a spoken sentence is allowed to make happen
+jarvis/window/    the HUD: a stdlib HTTP server on 127.0.0.1 + one static page; reads rows, never memory
 jarvis/cc/        the Claude Code driver — its own OS process, never speaks
 jarvis/__main__.py  THE composition root. The one file allowed to know every layer
 spikes/           experiments with recorded results; they stay runnable
@@ -157,8 +159,13 @@ here. Each gap below is one missing caller:
 - **Nothing consumes `briefing.started`.** `jarvis/schedule/gate.py` publishes it, `jarvis/briefing/` has no
   importer outside its own directory, and `navigator.begin()` has no caller. Worse, that event kind is
   published from TWO places with incompatible payloads.
-- **Nothing reads the event log at all.** `bus.read_since` and `bus.commit_cursor` — the bus's whole consumer
-  API — have no production caller. The hash-chained log is written and never read.
+- **Nothing CONSUMES the event log.** `bus.read_since` and `bus.commit_cursor` — the bus's whole consumer
+  API — have no production caller. The window now READS it (`jarvis/window/snapshot.py`, plain SELECTs on
+  `seq`, never `commit_cursor`: it is a viewer and must not move anybody's cursor), and the desk now WRITES
+  its live events into it — the two queues that existed and were never drained, plus the turn controller,
+  which had no event sink at all. Rows: `live.*` (transcripts, tool calls), `audio.*` (wake, turns),
+  heartbeats `alive.<process>` in `cursors` (`jarvis/liveness.py`). Speech the window asks for is a `say`
+  command the desk consumes, because only the desk may own the speaker while it runs (rule 2).
 **General use** (not a gap, a capability, so it is listed): `python -m jarvis chat` is the same assistant
 by text over the Gemini API, with the registry's tools via OUR tool loop (never the SDK's automatic
 calling, which would bypass the channel gate). Weather/place/time (`jarvis/geo`, Open-Meteo + GeoLite2),

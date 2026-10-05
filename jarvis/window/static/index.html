@@ -1,0 +1,333 @@
+<!doctype html>
+<!--
+  The HUD. Structure only: every byte of data arrives later through app.js, which
+  writes it with textContent so nothing said aloud can ever become markup here.
+  The server's CSP forbids inline script and style, so this file has neither.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>J.A.R.V.I.S.</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+
+<div class="netbar" id="netbar" role="status" aria-live="polite">
+  <span class="netbar-text" id="netbar-text">Reconnecting…</span>
+</div>
+
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand">
+      <span class="wordmark">J.A.R.V.I.S.</span>
+      <span class="brand-sub">this computer · local link</span>
+    </div>
+
+    <ul class="chips" aria-label="Processes">
+      <li class="chip" id="chip-desk" data-online="false" data-state="offline">
+        <span class="chip-dot" aria-hidden="true"></span>
+        <span class="chip-name">Desk</span>
+        <span class="chip-state" id="chip-desk-state">—</span>
+      </li>
+      <li class="chip" id="chip-schedule" data-online="false" data-state="offline">
+        <span class="chip-dot" aria-hidden="true"></span>
+        <span class="chip-name">Scheduler</span>
+        <span class="chip-state" id="chip-schedule-state">—</span>
+      </li>
+      <li class="chip" id="chip-telegram" data-online="false" data-state="offline">
+        <span class="chip-dot" aria-hidden="true"></span>
+        <span class="chip-name">Telegram</span>
+        <span class="chip-state" id="chip-telegram-state">—</span>
+      </li>
+    </ul>
+
+    <div class="topbar-right">
+      <div class="clock" aria-label="Local time">
+        <time class="clock-time" id="clock-time">--:--</time>
+        <span class="clock-date" id="clock-date"></span>
+      </div>
+      <button class="stop" id="stop" type="button"
+              aria-label="Stop everything. Hold for one second."
+              title="Hold for one second to stop every job, call and command">
+        <span class="stop-ring" aria-hidden="true">
+          <span class="stop-half stop-half-r"><i></i></span>
+          <span class="stop-half stop-half-l"><i></i></span>
+          <span class="stop-core"></span>
+        </span>
+        <span class="stop-text">
+          <span class="stop-word">Stop</span>
+          <span class="stop-hint">hold 1 s</span>
+        </span>
+      </button>
+    </div>
+  </header>
+
+  <main class="hud">
+    <!-- The desk: is anyone listening, and can anything be heard? -->
+    <section class="status panel" aria-label="Desk status">
+      <div class="reactor-wrap">
+        <div class="orb" id="orb" data-state="unknown" role="img" aria-labelledby="orb-state">
+          <div class="orb-halo"></div>
+          <div class="orb-ripple orb-ripple-1"></div>
+          <div class="orb-ripple orb-ripple-2"></div>
+          <div class="orb-ripple orb-ripple-3"></div>
+          <div class="orb-reactor">
+            <div class="orb-layer orb-frame">
+              <svg viewBox="0 0 320 320" aria-hidden="true" focusable="false">
+                <circle class="ln faint" cx="160" cy="160" r="157"/>
+                <circle class="ln faint" cx="160" cy="160" r="138"/>
+                <path class="ln mid" d="M160 0v12M160 308v12M0 160h12M308 160h12"/>
+                <path class="ln mid" d="M47 47l6 6M273 47l-6 6M47 273l6-6M273 273l-6-6"/>
+              </svg>
+            </div>
+            <div class="orb-layer orb-ticks">
+              <svg viewBox="0 0 320 320" aria-hidden="true" focusable="false">
+                <circle class="ln tick-minor" cx="160" cy="160" r="148"/>
+                <circle class="ln tick-major" cx="160" cy="160" r="148"/>
+              </svg>
+            </div>
+            <div class="orb-layer orb-arcs">
+              <svg viewBox="0 0 320 320" aria-hidden="true" focusable="false">
+                <circle class="ln arc" cx="160" cy="160" r="127"/>
+                <circle class="ln dots" cx="160" cy="160" r="117"/>
+              </svg>
+            </div>
+            <div class="orb-layer orb-pulse">
+              <div class="orb-layer orb-coils">
+                <svg viewBox="0 0 320 320" aria-hidden="true" focusable="false">
+                  <circle class="ln thin" cx="160" cy="160" r="104"/>
+                  <circle class="ln coil" cx="160" cy="160" r="92"/>
+                  <circle class="ln thin" cx="160" cy="160" r="80"/>
+                </svg>
+              </div>
+            </div>
+            <div class="orb-layer orb-inner">
+              <svg viewBox="0 0 320 320" aria-hidden="true" focusable="false">
+                <circle class="ln inner-dash" cx="160" cy="160" r="66"/>
+                <circle class="ln thin" cx="160" cy="160" r="57"/>
+              </svg>
+            </div>
+            <div class="orb-core"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="status-text">
+        <p class="orb-state" id="orb-state">Connecting</p>
+        <p class="orb-note" id="orb-note"></p>
+        <button class="attention" id="attention" type="button" hidden></button>
+      </div>
+
+      <dl class="readouts">
+        <div class="readout">
+          <dt>Desk</dt>
+          <dd id="ro-desk">—</dd>
+        </div>
+        <div class="readout">
+          <dt>Presence</dt>
+          <dd id="ro-presence">—</dd>
+        </div>
+        <div class="readout">
+          <dt>Wake word</dt>
+          <dd id="ro-wake">—</dd>
+        </div>
+        <div class="readout">
+          <dt>Voice</dt>
+          <dd id="ro-voice">—</dd>
+        </div>
+        <div class="readout readout-wide">
+          <dt>Spend</dt>
+          <dd id="ro-spend">—</dd>
+        </div>
+      </dl>
+    </section>
+
+    <!-- What was said, by anyone, on any channel — and a place to type. -->
+    <section class="talk panel" aria-label="Conversation">
+      <div class="panel-head">
+        <h2 class="eyebrow">Conversation</h2>
+        <span class="panel-meta" id="feed-meta">—</span>
+        <span class="link" id="link" data-live="false">
+          <span class="link-dot" aria-hidden="true"></span>
+          <span id="link-text">offline</span>
+        </span>
+      </div>
+      <div class="feed-scroll" id="feed-scroll">
+        <p class="feed-empty" id="feed-empty">Nothing said yet. Talk to the desk, or type below.</p>
+        <ol class="feed" id="feed" aria-live="polite" aria-relevant="additions" aria-label="Conversation log"></ol>
+        <div class="thinking" id="thinking" hidden aria-hidden="true">
+          <span></span><span></span><span></span>
+        </div>
+      </div>
+      <button class="jump" id="jump" type="button" hidden>Latest ↓</button>
+      <form class="composer" id="composer" autocomplete="off">
+        <label class="sr-only" for="chat-input">Message Jarvis</label>
+        <input class="composer-input" id="chat-input" type="text" maxlength="4000"
+               placeholder="Ask Jarvis anything…" enterkeyhint="send">
+        <label class="switch" title="Say each reply out loud">
+          <input type="checkbox" id="speak-replies">
+          <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+          <span class="switch-label">Speak replies</span>
+        </label>
+        <button class="btn btn-primary" id="chat-send" type="submit">Send</button>
+        <p class="composer-why" id="chat-why" hidden></p>
+      </form>
+    </section>
+
+    <!-- Everything you can do with your hands instead of your voice. -->
+    <aside class="side panel" aria-label="Tools and lists">
+      <div class="tabs" role="tablist" id="tabs" aria-label="Sections">
+        <button class="tab" role="tab" type="button" id="tab-tools" data-tab="tools"
+                aria-controls="panel-tools" aria-selected="true">
+          <span class="tab-count" id="count-tools">00</span><span class="tab-label">Tools</span>
+        </button>
+        <button class="tab" role="tab" type="button" id="tab-reminders" data-tab="reminders"
+                aria-controls="panel-reminders" aria-selected="false" tabindex="-1">
+          <span class="tab-count" id="count-reminders">00</span><span class="tab-label">Reminders</span>
+        </button>
+        <button class="tab" role="tab" type="button" id="tab-notes" data-tab="notes"
+                aria-controls="panel-notes" aria-selected="false" tabindex="-1">
+          <span class="tab-count" id="count-notes">00</span><span class="tab-label">Notes</span>
+        </button>
+        <button class="tab" role="tab" type="button" id="tab-questions" data-tab="questions"
+                aria-controls="panel-questions" aria-selected="false" tabindex="-1">
+          <span class="tab-count" id="count-questions">00</span><span class="tab-label">Questions</span>
+        </button>
+        <button class="tab" role="tab" type="button" id="tab-builds" data-tab="builds"
+                aria-controls="panel-builds" aria-selected="false" tabindex="-1">
+          <span class="tab-count" id="count-builds">00</span><span class="tab-label">Builds</span>
+        </button>
+        <button class="tab" role="tab" type="button" id="tab-hearing" data-tab="hearing"
+                aria-controls="panel-hearing" aria-selected="false" tabindex="-1">
+          <span class="tab-count" id="count-hearing">00</span><span class="tab-label">Hearing</span>
+        </button>
+      </div>
+
+      <div class="tabpanels">
+        <section class="tabpanel" role="tabpanel" id="panel-tools" aria-labelledby="tab-tools">
+          <h3 class="eyebrow">Quick actions</h3>
+          <div class="quick" id="quick">
+            <button class="btn quick-btn" type="button" data-quick="weather-now">Weather now</button>
+            <button class="btn quick-btn" type="button" data-quick="weather-tomorrow">Tomorrow</button>
+            <button class="btn quick-btn" type="button" data-quick="weather-week">This week</button>
+            <button class="btn quick-btn" type="button" data-quick="where">Where am I</button>
+            <button class="btn quick-btn" type="button" data-quick="time">Time in…</button>
+            <button class="btn quick-btn" type="button" data-quick="search">Web search</button>
+            <button class="btn quick-btn" type="button" data-quick="remind">Remind me</button>
+            <button class="btn quick-btn" type="button" data-quick="remember">Remember</button>
+            <button class="btn quick-btn" type="button" data-quick="say">Say aloud</button>
+          </div>
+          <form class="form quick-form" id="quick-form" hidden autocomplete="off"></form>
+          <div class="result" id="tool-result" aria-live="polite" hidden>
+            <span class="result-head" id="tool-result-head"></span>
+            <p class="result-text" id="tool-result-text"></p>
+          </div>
+          <div class="eyebrow-row">
+            <h3 class="eyebrow">All tools</h3>
+            <button class="kbd-hint" id="open-palette" type="button" title="Open the command palette">
+              <kbd>Ctrl</kbd><kbd>K</kbd>
+            </button>
+          </div>
+          <div class="tool-list" id="tool-list"></div>
+          <p class="empty" id="tools-empty" hidden>No tools are offered to this window.</p>
+        </section>
+
+        <section class="tabpanel" role="tabpanel" id="panel-reminders" aria-labelledby="tab-reminders" hidden>
+          <p class="warn-note" id="schedule-warn" hidden>
+            The scheduler is not running, so reminders will not be said when they are due.
+            Start it with <code>python -m jarvis.schedule</code>.
+          </p>
+          <h3 class="eyebrow">Set a reminder</h3>
+          <form class="form" id="remind-form" autocomplete="off">
+            <label class="field"><span class="field-label">Remind me to</span>
+              <input name="what" type="text" required placeholder="call mum"></label>
+            <label class="field"><span class="field-label">When</span>
+              <input name="when" type="text" required placeholder="in 20 minutes · at 6pm · tomorrow at 9"></label>
+            <button class="btn btn-primary" type="submit">Set reminder</button>
+          </form>
+          <h3 class="eyebrow">Pending</h3>
+          <ul class="rows" id="reminder-list"></ul>
+          <p class="empty" id="reminders-empty">No reminders set.</p>
+        </section>
+
+        <section class="tabpanel" role="tabpanel" id="panel-notes" aria-labelledby="tab-notes" hidden>
+          <h3 class="eyebrow">Remember something</h3>
+          <form class="form" id="note-form" autocomplete="off">
+            <label class="field"><span class="field-label">Remember</span>
+              <input name="fact" type="text" required placeholder="my locker is 214"></label>
+            <button class="btn btn-primary" type="submit">Remember</button>
+          </form>
+          <h3 class="eyebrow">Notes</h3>
+          <ul class="rows" id="note-list"></ul>
+          <p class="empty" id="notes-empty">No notes yet. Anything you ask Jarvis to remember appears here.</p>
+        </section>
+
+        <section class="tabpanel" role="tabpanel" id="panel-questions" aria-labelledby="tab-questions" hidden>
+          <div class="questions" id="question-list"></div>
+          <p class="empty" id="questions-empty">Nothing is waiting on you.</p>
+        </section>
+
+        <section class="tabpanel" role="tabpanel" id="panel-builds" aria-labelledby="tab-builds" hidden>
+          <h3 class="eyebrow">Jobs</h3>
+          <ul class="rows" id="job-list"></ul>
+          <p class="empty" id="jobs-empty">No jobs. Describe something to build and it starts here.</p>
+          <h3 class="eyebrow">Projects</h3>
+          <ul class="lines" id="project-lines"></ul>
+          <p class="empty" id="projects-empty">Nothing finished, failed or stuck recently.</p>
+        </section>
+
+        <section class="tabpanel" role="tabpanel" id="panel-hearing" aria-labelledby="tab-hearing" hidden>
+          <h3 class="eyebrow">Teach a word</h3>
+          <form class="form" id="hearing-form" autocomplete="off">
+            <label class="field"><span class="field-label">I said</span>
+              <input name="meant" type="text" required placeholder="quote"></label>
+            <label class="field"><span class="field-label">You heard</span>
+              <input name="heard" type="text" placeholder="coat"></label>
+            <button class="btn btn-primary" type="submit">Teach</button>
+          </form>
+          <h3 class="eyebrow">Words it listens for</h3>
+          <ul class="rows" id="hearing-list"></ul>
+          <p class="empty" id="hearing-empty">No corrections yet. When it mishears a word, teach it here.</p>
+        </section>
+      </div>
+    </aside>
+  </main>
+</div>
+
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<dialog class="palette" id="palette" aria-label="Command palette">
+  <div class="palette-box">
+    <input class="palette-input" id="palette-input" type="text" role="combobox"
+           aria-controls="palette-list" aria-expanded="true" aria-autocomplete="list"
+           placeholder="Run a tool or open a section…" autocomplete="off">
+    <ul class="palette-list" id="palette-list" role="listbox" aria-label="Commands"></ul>
+    <p class="palette-hint">↑ ↓ to move · Enter to open · Esc to close</p>
+  </div>
+</dialog>
+
+<div class="gate" id="gate" hidden>
+  <div class="gate-box" role="alertdialog" aria-labelledby="gate-title" aria-describedby="gate-body">
+    <p class="gate-eyebrow">Locked</p>
+    <h1 class="gate-title" id="gate-title">Open this from <code>python -m jarvis window</code>.</h1>
+    <p class="gate-body" id="gate-body">
+      The window opens with a one-time key in its address, and this page was reached without one.
+      Close it and run the command again; the new window carries a fresh key.
+    </p>
+  </div>
+</div>
+
+<template id="tpl-speaker">
+  <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+    <path d="M2.5 6h2.2L8 3.2v9.6L4.7 10H2.5z"/>
+    <path class="icon-wave" d="M10.4 5.6a3.2 3.2 0 0 1 0 4.8M12.2 3.8a5.8 5.8 0 0 1 0 8.4"/>
+  </svg>
+</template>
+
+</body>
+</html>

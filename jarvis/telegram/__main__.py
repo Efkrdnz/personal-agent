@@ -27,9 +27,11 @@ import os
 import sqlite3
 import sys
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import replace
 from typing import Any
 
+from jarvis import liveness
 from jarvis import requests as rq
 from jarvis.bus import Capabilities, Peer, Redactor, publish
 from jarvis.db import open_db
@@ -361,6 +363,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         finally:
             peer.detach(con, reason="exit")
+            with suppress(sqlite3.Error):
+                liveness.gone(con, "telegram")
         if args.once:
             return EXIT_OK
         # A daemon loop that RETURNS has given up on the poll, which is not a
@@ -390,6 +394,9 @@ def _tick(con: sqlite3.Connection, transport: Transport, peer: Peer) -> None:
     tick instead of after a restart.
     """
     peer.heartbeat(con)
+    # The window's "telegram is running" chip. A long poll returns at most every
+    # poll timeout, so a reader allows a few of those before calling it dead.
+    liveness.beat(con, "telegram", state="running", detail={"every_s": bot.DEFAULT_POLL_TIMEOUT_S})
     rq.expire_due(con)
     bound = identity.bound_chat(con)
     if bound is not None:

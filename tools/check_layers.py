@@ -75,6 +75,7 @@ RULES: dict[str, tuple[str, ...]] = {
         # and an optional binary reader; the spine must keep importing under
         # `python -S` on a box with neither.
         "jarvis.geo",
+        "jarvis.window",
     ),
     # A channel reaches Claude Code through rows in ``requests`` and nothing
     # else. Importing the desk would make it unable to run on a headless box,
@@ -89,6 +90,7 @@ RULES: dict[str, tuple[str, ...]] = {
         # writes the delivery rows this channel picks up; a channel that
         # could import it could brief the user on itself.
         "jarvis.schedule",
+        "jarvis.window",
     ),
     "jarvis/capture": (
         "jarvis.cc",
@@ -97,6 +99,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.live",
         "jarvis.github",
         "jarvis.schedule",
+        "jarvis.window",
     ),
     # An outward PROVIDER adapter: it reaches GitHub over HTTPS and knows the
     # spine's vocabulary (jarvis.effects owns the promise words its spoken line is
@@ -121,6 +124,7 @@ RULES: dict[str, tuple[str, ...]] = {
         # what is worth saying at ten in the morning.
         "jarvis.briefing",
         "jarvis.schedule",
+        "jarvis.window",
     ),
     # THE PROJECT LIFECYCLE: above the github client, below everything that
     # speaks. It raises `requests` rows, writes `effects` and `outbox` rows and
@@ -138,6 +142,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.telegram",
         "jarvis.capture",
         "jarvis.schedule",
+        "jarvis.window",
     ),
     # A BRIEFING DOES NOT KNOW HOW IT IS DELIVERED. That is the whole point of
     # the stage: a section is a row in `requests`, and which channel says it is
@@ -153,6 +158,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.live",
         "jarvis.telegram",
         "jarvis.capture",
+        "jarvis.window",
     ),
     # THE SCHEDULER NEVER SPEAKS AND NEVER DIALS. It knows the spine, it asks
     # presence where the user is, and it writes `deliveries` rows naming a
@@ -173,6 +179,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.github",
         "jarvis.project",
         "jarvis.briefing",
+        "jarvis.window",
     ),
     # THE TOOL SURFACE: what a spoken sentence is allowed to make happen. It sits
     # ABOVE the lifecycle and BELOW everything that has a microphone or a socket,
@@ -189,6 +196,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.audio",
         "jarvis.live",
         "jarvis.telegram",
+        "jarvis.window",
     ),
     # WHERE AND WHAT THE SKY IS DOING: an outward provider adapter, like the
     # GitHub client. It fetches public JSON and reads a local GeoLite2 file, and
@@ -208,11 +216,24 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.briefing",
         "jarvis.schedule",
         "jarvis.tools",
+        "jarvis.window",
     ),
     # The desk speaks and listens. Which channel is attached is not its business,
     # and the driver is a process it talks to through the database.
-    "jarvis/voice": ("jarvis.cc", "jarvis.telegram", "jarvis.github", "jarvis.schedule"),
-    "jarvis/audio": ("jarvis.cc", "jarvis.telegram", "jarvis.github", "jarvis.schedule"),
+    "jarvis/voice": (
+        "jarvis.cc",
+        "jarvis.telegram",
+        "jarvis.github",
+        "jarvis.schedule",
+        "jarvis.window",
+    ),
+    "jarvis/audio": (
+        "jarvis.cc",
+        "jarvis.telegram",
+        "jarvis.github",
+        "jarvis.schedule",
+        "jarvis.window",
+    ),
     # The other half of the same seam, and the half the answer-shape move was
     # about: the driver NEVER SPEAKS and does not know which channel is attached.
     # Without this the guard is one-directional — it would have caught the voice
@@ -228,8 +249,27 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.telegram",
         "jarvis.briefing",
         "jarvis.schedule",
+        "jarvis.window",
+    ),
+    # THE HUD. The top of the stack, beside the composition root: it reads the
+    # rows every process writes and writes a few of its own (a tool call, an
+    # answer, a say command). It reaches no device, no model and no driver
+    # directly — chat and speech are callables the composition root hands it —
+    # so it runs on a box with nothing installed but the standard library.
+    "jarvis/window": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.capture",
+        "jarvis.schedule",
+        "jarvis.github",
+        "jarvis.project",
+        "jarvis.briefing",
     ),
 }
+
 
 #: The one key in RULES that is not a directory. Named so the key and the lookup
 #: cannot drift, which would silently turn the spine's rule into an empty glob.

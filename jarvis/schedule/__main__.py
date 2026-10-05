@@ -33,6 +33,7 @@ from collections.abc import Callable, Sequence
 from contextlib import suppress
 from types import FrameType
 
+from jarvis import liveness
 from jarvis.clock import DEFAULT_TZ, spoken_time
 from jarvis.db import open_db
 from jarvis.ids import now
@@ -148,6 +149,10 @@ def run(
     while True:
         report = tick(con, actor=actor, claimed_by=claimed_by, now_ts=now())
         reports.append(report)
+        # Every tick, so the window can say "the scheduler is running" — the
+        # thing reminders and Telegram both silently depend on. `every_s` is how
+        # long a reader should wait before calling a quiet scheduler dead.
+        liveness.beat(con, "schedule", state="running", detail={"every_s": interval_s})
         for fired in report.fired:
             _say(f"{fired.schedule}: {fired.outcome} for {fired.due_at} ({fired.late_s:.0f}s late)")
         for outcome in report.answers:
@@ -202,15 +207,19 @@ def main(argv: Sequence[str] | None = None, *, sleep: Callable[[float], None] = 
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, _stop)
 
-        run(
-            con,
-            actor="scheduler",
-            claimed_by=claimed_by,
-            interval_s=args.interval,
-            once=args.once,
-            sleep=sleep,
-            stop=lambda: stopping,
-        )
+        try:
+            run(
+                con,
+                actor="scheduler",
+                claimed_by=claimed_by,
+                interval_s=args.interval,
+                once=args.once,
+                sleep=sleep,
+                stop=lambda: stopping,
+            )
+        finally:
+            with suppress(sqlite3.Error):
+                liveness.gone(con, "schedule")
         return EXIT_OK
     except KeyboardInterrupt:
         return EXIT_OK

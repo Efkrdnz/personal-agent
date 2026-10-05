@@ -109,7 +109,9 @@ __all__ = [
 
 # ───────────────────────────── the vocabulary ─────────────────────────────
 
-Verb = Literal["stop_all", "kill", "interrupt", "pause", "resume", "hangup", "nav", "reload"]
+# "say" steers, it does not stop: the window asks the desk to read something
+# aloud, because only the desk may own the speaker while it runs (rule 2).
+Verb = Literal["stop_all", "kill", "interrupt", "pause", "resume", "hangup", "nav", "reload", "say"]
 TargetKind = Literal["all", "job", "channel", "process"]
 CommandState = Literal["pending", "done", "expired", "cancelled"]
 TerminateOutcome = Literal["no_pid", "stale", "gone", "term", "kill", "denied"]

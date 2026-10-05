@@ -1,0 +1,185 @@
+"""`python -m jarvis window`: what the composition root hands the server, and where speech goes.
+
+Speech is the interesting part. The desk owns the speaker while it runs (rule 2:
+one output stream, or the echo canceller hears audio it was never shown), so the
+window asks the desk to speak through a ``say`` command row; with no desk
+running, it speaks itself. Which of the two happened is the whole test.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from jarvis import __main__ as cli
+from jarvis import kill, liveness, secrets
+from jarvis.config import Config
+from jarvis.db import connect, migrate
+
+
+@pytest.fixture
+def dbpath(tmp_path: Path) -> Path:
+    p = tmp_path / "j.db"
+    c = connect(p)
+    migrate(c)
+    c.close()
+    return p
+
+
+@pytest.fixture
+def con(dbpath: Path) -> Iterator[sqlite3.Connection]:
+    c = connect(dbpath)
+    yield c
+    c.close()
+
+
+@pytest.fixture
+def no_secrets(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    for s in secrets.SECRETS:
+        monkeypatch.delenv(s.env, raising=False)
+    monkeypatch.setattr(secrets, "_from_keyring", lambda secret: None)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+
+
+# ───────────────────────────── speech ─────────────────────────────
+
+
+def test_with_the_desk_running_the_desk_is_asked_to_speak(
+    dbpath: Path, con: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    played: list[bytes] = []
+    monkeypatch.setattr(cli, "_play", lambda pcm, rate: played.append(pcm))
+    liveness.beat(con, "desk", state="awake")
+    speak = cli._window_speaker(Config(), str(dbpath))
+    assert speak("call mum") == "desk"
+    (cmd,) = kill.pending_commands(con, actor="desk", verbs=("say",))
+    assert cmd.args == {"text": "call mum"} and cmd.target_id == "desk"
+    assert played == [], "a second output stream while the desk runs is echo"
+
+
+def test_a_desk_that_said_goodbye_is_not_asked(
+    dbpath: Path, con: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    liveness.gone(con, "desk")
+    played: list[bytes] = []
+    monkeypatch.setattr(cli, "_play", lambda pcm, rate: played.append(pcm) or None)
+    monkeypatch.setattr(cli, "reader_engines", lambda cfg: [object()])
+
+    class Speaker:
+        def __init__(self, engines: Any) -> None:
+            pass
+
+        async def pcm_for(self, text: str, lang: str, *, exact: bool) -> bytes:
+            assert exact is False
+            return b"\x00\x01" * 10
+
+    monkeypatch.setattr("jarvis.voice.verbatim.VerbatimSpeaker", Speaker)
+    speak = cli._window_speaker(Config(), str(dbpath))
+    assert speak("hello") == "local"
+    assert played == [b"\x00\x01" * 10]
+    assert kill.pending_commands(con, actor="desk", verbs=("say",)) == []
+
+
+def test_no_desk_and_no_voice_is_a_sentence(dbpath: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "reader_engines", lambda cfg: [])
+    speak = cli._window_speaker(Config(), str(dbpath))
+    with pytest.raises(RuntimeError, match="no voice"):
+        speak("hello")
+
+
+def test_without_a_key_chat_is_off_and_says_why() -> None:
+    chat, why = cli._window_chat(Config(), None, None, None, {}, "")
+    assert chat is None and "secrets set gemini_api_key" in why
+
+
+# ───────────────────────────── the command ─────────────────────────────
+
+
+class FakeServer:
+    def __init__(self) -> None:
+        self.port = 54321
+        self.token = "tok_" + "x" * 30
+        self.url = f"http://127.0.0.1:{self.port}/#t={self.token}"
+        self.shut = False
+
+    def serve_forever(self) -> None:
+        raise KeyboardInterrupt
+
+    def shutdown(self) -> None:
+        self.shut = True
+
+
+def run_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *extra: str
+) -> tuple[dict[str, Any], list[str], FakeServer]:
+    from jarvis.window import launch, server
+
+    made: dict[str, Any] = {}
+    opened: list[str] = []
+    fake = FakeServer()
+
+    def make_server(services: Any, **kw: Any) -> FakeServer:
+        made["services"], made["kw"] = services, kw
+        return fake
+
+    monkeypatch.setattr(server, "make_server", make_server)
+    monkeypatch.setattr(launch, "open_window", lambda url: opened.append(url) or "edge-app")
+    assert cli.main(["--db", str(tmp_path / "w.db"), "window", *extra]) == 0
+    return made, opened, fake
+
+
+def test_the_window_command_builds_the_services_and_opens_the_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_secrets: None,
+) -> None:
+    made, opened, fake = run_window(tmp_path, monkeypatch)
+    s = made["services"]
+    assert len(s.registry) > 0 and callable(s.speak) and callable(s.open_db)
+    assert s.chat is None and "gemini_api_key" in s.chat_why
+    assert s.tz == Config().tz and s.redactor is not None
+    assert made["kw"].get("port") == 0
+    assert opened == [fake.url] and fake.shut
+    out = capsys.readouterr().out
+    assert "http://127.0.0.1:54321/" in out
+    assert fake.token not in out, "the token is the whole access check; never print it unasked"
+
+
+def test_no_open_prints_the_full_address_because_the_user_needs_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_secrets: None,
+) -> None:
+    _, opened, fake = run_window(tmp_path, monkeypatch, "--no-open", "--port", "8765")
+    assert opened == []
+    assert fake.url in capsys.readouterr().out
+
+
+def test_every_request_gets_its_own_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, no_secrets: None
+) -> None:
+    made, _, _ = run_window(tmp_path, monkeypatch)
+    a, b = made["services"].open_db(), made["services"].open_db()
+    try:
+        assert a is not b
+        a.execute("SELECT 1 FROM events LIMIT 1")  # migrated before the first request
+    finally:
+        a.close()
+        b.close()
+
+
+def test_doctor_lists_the_window() -> None:
+    import ast
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    readiness = next(
+        n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_readiness"
+    )
+    assert "python -m jarvis window" in ast.unparse(readiness)

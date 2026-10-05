@@ -21,6 +21,7 @@ The commands, in the order somebody new to the machine needs them:
     python -m jarvis answer 1 2     answer one, by the numbers you were read
     python -m jarvis desk           listen, talk, and drive Claude Code
     python -m jarvis chat           the same assistant by text, over the Gemini API
+    python -m jarvis window         the HUD: status, the conversation and every tool
     python -m jarvis say "..."      speak with the built-in reader voice
     python -m jarvis weather        the weather here, or somewhere named
     python -m jarvis geo update     download GeoLite2, for "where am I"
@@ -503,6 +504,7 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
     if not chat_why and not _installed("google.genai"):
         chat_why = 'google-genai is not installed (pip install -e ".[live]")'
     verdict(not chat_why, "python -m jarvis chat", chat_why)
+    r.add(OK, f"{'python -m jarvis window':<28} — the HUD; chat in it needs the same key")
     build_why = "" if have.get("gemini_api_key") else "no gemini_api_key (it tidies your words)"
     r.add(
         OK if not build_why else WARN,
@@ -1300,6 +1302,159 @@ def _wake_score(model: Any, pcm: bytes, rate: int) -> float:
     )
 
 
+# ───────────────────────────── the window ─────────────────────────────
+
+
+def cmd_window(args: argparse.Namespace) -> int:
+    """The HUD: a local page in an app window, reading the rows every process writes."""
+    from jarvis.tools.default import registry
+    from jarvis.window.launch import open_window
+    from jarvis.window.server import Services, make_server
+
+    cfg = cfgmod.load(args.config)
+    key = secrets.get("gemini_api_key")
+    con = db.open_db(args.db)  # migrate once, before any request needs the tables
+    try:
+        notes_paragraph = remembered(con)
+    finally:
+        con.close()
+
+    reg = registry()
+    extra = tool_extra(cfg, key)
+    chat, chat_why = _window_chat(cfg, key, args.db, reg, extra, notes_paragraph)
+    services = Services(
+        open_db=lambda: db.connect(args.db),
+        registry=reg,
+        extra=extra,
+        chat=chat,
+        chat_why=chat_why,
+        speak=_window_speaker(cfg, args.db),
+        wake_word=_wake_phrase(cfg),
+        wake_threshold=cfg.voice.wake_threshold,
+        spend_threshold_usd=cfg.spend_threshold_usd,
+        tz=cfg.tz,
+        redactor=desk_redactor(),
+    )
+    server = make_server(services, port=args.port)
+    # The token is printed only when the user must paste it themselves: a
+    # terminal gets screenshotted, and the token is the whole of the access check.
+    print(f"jarvis window on http://127.0.0.1:{server.port}/  (ctrl-c to stop)")
+    if args.no_open:
+        print(f"open this in a browser: {server.url}")
+    else:
+        how = open_window(server.url)
+        print(f"opened it ({how}). If nothing appeared, run again with --no-open.")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nstopped.")
+    finally:
+        server.shutdown()
+    return 0
+
+
+def _wake_phrase(cfg: cfgmod.Config) -> str:
+    """The wake word as it is said, for the HUD to print. "" when there is none."""
+    if not cfg.voice.wake_word:
+        return ""
+    try:
+        from jarvis.audio.wake import PHRASES  # imports numpy: the voice extra
+    except ImportError:
+        return cfg.voice.wake_word.replace("_", " ")
+    found = PHRASES.get(cfg.voice.wake_word)
+    return found[1] if found else cfg.voice.wake_word.replace("_", " ")
+
+
+def _window_chat(
+    cfg: cfgmod.Config,
+    key: str | None,
+    db_path: str | None,
+    reg: Any,
+    extra: dict[str, Any],
+    notes_paragraph: str,
+) -> tuple[Any, str]:
+    """``(chat, why_not)``: the same assistant as `python -m jarvis chat`, for the window."""
+    if not key:
+        return None, "Chat needs the Gemini key: python -m jarvis secrets set gemini_api_key"
+    if not _installed("google.genai"):
+        return None, 'Chat needs google-genai: uv pip install -e ".[live]"'
+    from jarvis.live.chat import GeminiChat, persona
+    from jarvis.live.text import TextCallFailed
+    from jarvis.tools.ctx import ToolCtx
+
+    def dispatch(name: str, args_: dict[str, Any]) -> str:
+        # Its own connection per call: the chat runs on whichever server thread
+        # took the request, and a connection belongs to the thread that made it.
+        con = db.connect(db_path)
+        try:
+            ctx = ToolCtx(con=con, channel="cli", actor="window", extra=extra)
+            return reg.dispatch(name, args_, ctx)
+        finally:
+            con.close()
+
+    chat = GeminiChat(
+        api_key=key,
+        model=cfg.voice.text_model,
+        declarations=reg.declarations("cli"),
+        dispatch=dispatch,
+        system_instruction=persona(extra=notes_paragraph),
+    )
+
+    def send(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        try:
+            turn = chat.send(text)
+        except TextCallFailed as exc:
+            raise RuntimeError(f"Gemini didn't answer: {exc}") from exc
+        return turn.text, turn.tools
+
+    return send, ""
+
+
+def _window_speaker(cfg: cfgmod.Config, db_path: str | None) -> Any:
+    """``speak(text) -> "desk" | "local"`` for the window. Wiring only.
+
+    Through the desk when it is running — it owns the speaker, and a second
+    output stream is echo its canceller never saw — and through the reader
+    voice right here when it is not.
+    """
+    import asyncio
+
+    from jarvis import kill, liveness
+    from jarvis.voice.engines import RATE
+    from jarvis.voice.verbatim import VerbatimSpeaker
+
+    ladder = tuple(reader_engines(cfg))
+    language = cfg.location.language or "en"
+
+    def speak(text: str) -> str:
+        con = db.connect(db_path)
+        try:
+            beat = liveness.read(con, "desk")
+            if beat is not None and beat.state != liveness.OFFLINE:
+                kill.issue_command(
+                    con,
+                    verb="say",
+                    target_kind="channel",
+                    target_id="desk",
+                    args={"text": text},
+                    issued_by="window",
+                    ttl_s=30,
+                )
+                return "desk"
+        finally:
+            con.close()
+        if not ladder:
+            raise RuntimeError(
+                "there is no voice on this machine (Linux: sudo apt install espeak-ng)"
+            )
+        pcm = asyncio.run(VerbatimSpeaker(engines=ladder).pcm_for(text, language, exact=False))
+        if why := _play(pcm, RATE):
+            raise RuntimeError(why)
+        return "local"
+
+    return speak
+
+
 # ───────────────────────────── reminders ─────────────────────────────
 
 
@@ -1516,6 +1671,8 @@ class Desk:
     reader: Any | None
     #: The wake-word thread, or None when the desk listens all the time.
     wake: Any | None = None
+    #: Puts the desk's state and events into the database for the window.
+    publisher: Any | None = None
 
 
 def reader_engines(cfg: cfgmod.Config) -> list[Any]:
@@ -1591,14 +1748,15 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     from jarvis.audio import BLOCK, DEV_RATE, MIC_RATE
     from jarvis.audio.devices import DeviceError
     from jarvis.audio.dsp import AecUnavailable, EnergyVad
-    from jarvis.audio.graph import AudioGraph, QueuedEventSink
+    from jarvis.audio.graph import AudioEvent, AudioGraph, QueuedEventSink
     from jarvis.audio.legs import DeskLeg
     from jarvis.audio.micbus import MicBus
     from jarvis.audio.mixer import PlaybackMixer, Prio
     from jarvis.audio.turn import TurnController
     from jarvis.live.profiles import DESK, SessionProfile
-    from jarvis.live.session import GenaiConnector, LiveSession, QueuedUplink
+    from jarvis.live.session import GenaiConnector, LiveSession, QueuedLiveEvents, QueuedUplink
     from jarvis.tools.default import registry
+    from jarvis.voice.desk import DeskPublisher, desk_state
     from jarvis.voice.router import TrackSink
     from jarvis.voice.tools import DeskQuestions, LiveTools, Transcript
 
@@ -1626,10 +1784,15 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     except DeviceError as exc:
         raise StartupRefused(str(exc)) from exc
     print(f"{OK}  microphone and speaker: {selection.describe()}")
+    # The audio graph's events — wake, sleep, turns, barge-ins — and the turn
+    # controller's own, into ONE queue the publisher drains. The controller had
+    # no sink at all before, so "awake" happened and nothing anywhere knew.
+    audio_events = QueuedEventSink()
     turn = TurnController(
         mixer=mixer,
         vad=EnergyVad(),
         uplink=uplink,
+        on_event=lambda e: audio_events(AudioEvent(kind=e.kind, at=e.at, detail=dict(e.detail))),
         wake_window_s=cfg.voice.wake_window_s if cfg.voice.wake_word else None,
     )
     try:
@@ -1651,7 +1814,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         aec=aec,
         device_rate=leg.device_rate,
         block=leg.block,
-        on_event=QueuedEventSink(),
+        on_event=audio_events,
     )
     if leg.aec_degraded:
         print(f"{WARN}  no echo canceller — use a headset, or open speakers will hear themselves")
@@ -1683,17 +1846,54 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     if profile.vocabulary:
         print(f"{OK}  listening for: {', '.join(profile.vocabulary[-6:])}")
 
+    live_events = QueuedLiveEvents()
+    printer = _desk_event_printer(transcript)
+
+    def on_live_event(event: Any) -> None:
+        printer(event)
+        live_events(event)
+
     session = LiveSession(
         profile,
         uplink,
         TrackSink(live_track),
         connector=GenaiConnector(api_key=key),
         tools=tools,
-        on_event=_desk_event_printer(transcript),
+        on_event=on_live_event,
+    )
+    # Transcripts go into a log that is kept forever, so every configured
+    # secret's value is scrubbed on the way in. Built here because this is the
+    # one place allowed to read the keyring and know the bus.
+    redactor = desk_redactor()
+    publisher = DeskPublisher(
+        open_db=lambda: db.open_db(args.db),
+        state=lambda: desk_state(turn, mixer),
+        drains=(
+            lambda con: live_events.drain(con, "desk", redactor=redactor),
+            lambda con: audio_events.drain(con, "desk"),
+        ),
     )
     return Desk(
-        leg=leg, graph=graph, session=session, questions=questions, reader=reader, wake=wake
+        leg=leg,
+        graph=graph,
+        session=session,
+        questions=questions,
+        reader=reader,
+        wake=wake,
+        publisher=publisher,
     )
+
+
+def desk_redactor() -> Any:
+    """A bus Redactor holding every configured secret's value. Wiring only."""
+    from jarvis.bus import Redactor
+
+    values = []
+    for s in secrets.SECRETS:
+        with suppress(Exception):
+            if value := secrets.get(s.name):
+                values.append(value)
+    return Redactor.of(values)
 
 
 def _desk_wake(
@@ -1820,8 +2020,12 @@ def cmd_desk(args: argparse.Namespace) -> int:
         question is seconds of synthesis and speech, and the loop it would
         otherwise block is the one carrying the user's own voice.
         """
+        from jarvis.voice.desk import consume_say_commands
+        from jarvis.voice.router import Utterance
+
         loop = asyncio.get_running_loop()
-        if questions.speak is None and desk.reader is not None:
+        say_from_thread = None
+        if desk.reader is not None:
 
             def say_from_thread(utt: Any) -> int:
                 """Block the worker thread until the reader has finished the clip.
@@ -1833,12 +2037,33 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 """
                 return asyncio.run_coroutine_threadsafe(desk.reader.speak(utt), loop).result(120)
 
-            questions.speak = say_from_thread
+            if questions.speak is None:
+                questions.speak = say_from_thread
+
+        def say_for_the_window() -> int:
+            """The window's "say this aloud", through THIS process's speaker."""
+            if say_from_thread is None:
+                return 0
+            con = db.open_db(args.db)
+            try:
+                return consume_say_commands(
+                    con,
+                    lambda text: say_from_thread(
+                        Utterance(text=text, fidelity="faithful", tag="window:say")
+                    ),
+                )
+            finally:
+                con.close()
+
         while True:
             try:
                 await asyncio.to_thread(questions.poll)
             except Exception as exc:  # noqa: BLE001 - a bad row must not end the conversation
                 print(f"[questions] {type(exc).__name__}: {exc}")
+            try:
+                await asyncio.to_thread(say_for_the_window)
+            except Exception as exc:  # noqa: BLE001 - nor a bad say command
+                print(f"[say] {type(exc).__name__}: {exc}")
             await asyncio.sleep(DESK_POLL_S)
 
     async def run() -> None:
@@ -1848,6 +2073,8 @@ def cmd_desk(args: argparse.Namespace) -> int:
             print(f"asleep. say '{desk.wake.phrase}' to talk. ctrl-c to stop.")
         else:
             print("listening. ctrl-c to stop.")
+        if desk.publisher is not None:
+            desk.publisher.start()
         watcher = asyncio.create_task(watch_for_questions())
         try:
             await session.run()
@@ -1857,6 +2084,10 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 desk.wake.stop()
             await session.close()
             leg.close()
+            if desk.publisher is not None:
+                # Last: the final drain carries the goodbye events, and the
+                # final beat says "offline" so the window does not wait.
+                desk.publisher.stop()
 
     try:
         asyncio.run(run())
@@ -1950,6 +2181,13 @@ def build_parser() -> argparse.ArgumentParser:
     ch.add_argument("--speak", action="store_true", help="also say the answers out loud")
     ch.add_argument("--lang", default="en", help="the language to speak in")
     ch.set_defaults(fn=cmd_chat)
+
+    wn = sub.add_parser("window", help="the HUD: status, conversation and tools in a window")
+    wn.add_argument("--port", type=int, default=0, help="a fixed port (default: any free one)")
+    wn.add_argument(
+        "--no-open", action="store_true", help="print the address instead of opening a window"
+    )
+    wn.set_defaults(fn=cmd_window)
 
     rm = sub.add_parser("remind", help="reminders: list, or cancel one")
     rm.add_argument("action", choices=("list", "cancel"), nargs="?", default="list")
