@@ -22,13 +22,22 @@ on:
       - "conftest.py"
       - "pyproject.toml"
       - ".github/workflows/windows-app.yml"
+  # Run by hand, optionally as a release. A tag pushed from outside GitHub is
+  # the usual way; this one is for when only the Actions API is reachable, and
+  # the release job then makes the tag itself, on the commit this run tested.
   workflow_dispatch:
+    inputs:
+      release:
+        description: "Publish this run's exe as a release with this tag, e.g. v0.1.0. Empty: build only."
+        required: false
+        default: ""
+        type: string
 
-# A newer push to the same branch makes this run's exe obsolete. A tag is a
-# release and is never cancelled.
+# A newer push to the same branch makes this run's exe obsolete. A release,
+# by tag or by hand, is never cancelled, and never cancels a plain build.
 concurrency:
-  group: windows-app-${{ github.ref }}
-  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+  group: windows-app-${{ github.ref }}-${{ inputs.release || 'build' }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') && !inputs.release }}
 
 permissions:
   contents: read
@@ -178,7 +187,7 @@ jobs:
 
       # The zip itself, for the release job, only when this is a release.
       - name: Hand the zip to the release job
-        if: ${{ !cancelled() && steps.zip.outcome == 'success' && startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ !cancelled() && steps.zip.outcome == 'success' && (startsWith(github.ref, 'refs/tags/v') || inputs.release != '') }}
         uses: actions/upload-artifact@v4
         with:
           name: release-zip
@@ -217,11 +226,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
-  # Only from a v* tag, and only when the build job was green end to end. Its
-  # own job so that `contents: write` is never held by a job that runs pip.
+  # Only from a v* tag or a release asked for by hand, and only when the build
+  # job was green end to end. Its own job so that `contents: write` is never
+  # held by a job that runs pip.
   release:
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.release != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -230,11 +240,26 @@ jobs:
         with:
           name: release-zip
 
+      # The tag reaches the script through the environment, never pasted into
+      # it: a typed-in value is text to check, not code to run.
       - name: Publish the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: >-
-          gh release create "$TAG" Jarvis-Windows-x64.zip
-          --repo "$GITHUB_REPOSITORY" --verify-tag --title "Jarvis $TAG"
-          --notes "Unzip anywhere and double-click Jarvis.exe. First time? See docs/app.md."
+          TAG: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error title=release::'$TAG' is not a release tag like v0.1.0"
+            exit 1
+          fi
+          notes="Unzip anywhere and double-click Jarvis.exe. First time? Read https://github.com/$GITHUB_REPOSITORY/blob/$TAG/docs/app.md"
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            gh release create "$TAG" Jarvis-Windows-x64.zip --repo "$GITHUB_REPOSITORY" \
+              --verify-tag --title "Jarvis $TAG" --notes "$notes"
+          else
+            # By hand from a branch: the release creates the tag, on exactly
+            # the commit this run built, tested and selftested.
+            gh release create "$TAG" Jarvis-Windows-x64.zip --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" --title "Jarvis $TAG" --notes "$notes"
+          fi

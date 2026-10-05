@@ -182,6 +182,8 @@ finish if one turns up, and CI checks the output folder again.
 
 **CI.** `.github/workflows/windows-app.yml` runs on `windows-latest`: the whole test suite, the build, the
 licence check, the selftest, then uploads the folder as the `Jarvis-Windows-x64` artifact. A `v*` tag also
-publishes the zip as a release, but only from a run that was green end to end. Every step tees its output
+publishes the zip as a release, but only from a run that was green end to end. Where a tag cannot be pushed,
+run the workflow by hand (Actions → Windows app → Run workflow) with `release` set to e.g. `v0.2.0`: the
+same checks run, and the release job creates the tag on the commit that passed them. Every step tees its output
 into `ci-logs/`, and on failure `packaging/ci_annotate.py` turns the end of each log into an `::error`
 annotation, because annotations are what the check-run API returns when the raw logs are out of reach.

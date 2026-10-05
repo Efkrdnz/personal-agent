@@ -339,6 +339,46 @@ def test_only_the_release_job_can_write_to_the_repository() -> None:
     assert release["permissions"] == {"contents": "write"}
     assert release["needs"] == "build"
     assert "refs/tags/v" in release["if"]
+    assert "workflow_dispatch" in release["if"] and "inputs.release" in release["if"]
+
+
+def test_a_release_can_be_asked_for_by_hand_and_makes_its_own_tag() -> None:
+    # For when only the Actions API is reachable: the run builds, tests and
+    # selftests as always, and the release job creates the tag on that commit.
+    wf = _workflow()
+    on = wf.get("on", wf.get(True))
+    release_input = on["workflow_dispatch"]["inputs"]["release"]
+    assert release_input["default"] == "" and release_input["required"] is False
+    publish = next(
+        s for s in wf["jobs"]["release"]["steps"] if s.get("name") == "Publish the release"
+    )
+    script = publish["run"]
+    assert "^v[0-9]+\\.[0-9]+\\.[0-9]+$" in script, "a typed tag is checked before it is used"
+    assert '--target "$GITHUB_SHA"' in script and "--verify-tag" in script
+    hand_off = next(
+        s
+        for s in wf["jobs"]["build"]["steps"]
+        if s.get("name") == "Hand the zip to the release job"
+    )
+    assert "inputs.release" in hand_off["if"] and "steps.zip.outcome == 'success'" in hand_off["if"]
+    # A release is never cancelled by, and never cancels, a plain build.
+    assert "inputs.release" in wf["concurrency"]["group"]
+    assert "inputs.release" in wf["concurrency"]["cancel-in-progress"]
+
+
+def test_nothing_typed_or_sent_from_outside_is_pasted_into_a_script() -> None:
+    # ${{ }} in a run: block is substituted before the shell sees it, so a
+    # crafted input or branch name would run as code. The environment carries
+    # such values instead.
+    wf = _workflow()
+    for job in wf["jobs"].values():
+        for step in job["steps"]:
+            run = step.get("run", "")
+            for source in ("inputs.", "github.event.", "github.head_ref", "github.ref_name"):
+                assert "${{ " + source not in run and "${{" + source not in run, (
+                    step.get("name"),
+                    source,
+                )
 
 
 # ───────────────────────────── the annotations ─────────────────────────────
