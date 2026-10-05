@@ -17,7 +17,8 @@ safe to paste anywhere.
 
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install -e '.[cc,voice,live,tts,secrets,dev]'
+uv pip install -e '.[cc,voice,live,tts,geo,secrets,dev]'
+sudo apt install espeak-ng      # the built-in reader voice (macOS `say` / Windows SAPI need nothing)
 ```
 
 | extra | what stops working without it |
@@ -25,7 +26,8 @@ uv pip install -e '.[cc,voice,live,tts,secrets,dev]'
 | `cc` | Claude Code cannot be driven at all |
 | `voice` | no microphone — `numpy`, `sounddevice`, `soxr` |
 | `live` | no voice — Gemini Live is the conversational half |
-| `tts` | no reader voice, so Gemini reads load-bearing text in its own words |
+| `tts` | one fewer reader voice (Microsoft's, over the network). Not required: the OS voice reads exact text with nothing installed |
+| `geo` | no GeoLite2 lookup, so "where am I" needs `[location] city` in config.toml |
 | `secrets` | credentials fall back to environment variables |
 | `aec` | open speakers cannot barge in; a headset still works |
 
@@ -129,6 +131,71 @@ caller between two processes, not a missing feature:
 - **There is no wake word**: the desk listens from the moment it starts.
 - **The desk does not run the builder itself** — after speaking a build request, run
   `python -m jarvis build` to carry it forward.
+
+## The everyday assistant
+
+Jarvis is general-purpose, not only a build console. Everything below works at the desk by voice, and by
+text with `python -m jarvis chat` (the same tools, over the ordinary Gemini API):
+
+```bash
+python -m jarvis chat                          # a conversation; /reset, /quit
+python -m jarvis chat "weather in Ankara tomorrow"
+python -m jarvis chat --speak "what's on my reminders"   # and say the answer out loud
+```
+
+- **Weather, place and time.** "What's the weather", "will it rain tomorrow", "what time is it in Tokyo",
+  "where am I". The place comes from `[location]` in `config.toml` (a city, or coordinates — exact), or
+  else from your public IP via MaxMind GeoLite2, and an IP guess is always *said* to be approximate.
+  For the IP lookup: create a free account at maxmind.com, put your account id in
+  `location.maxmind_account_id`, then
+
+  ```bash
+  python -m jarvis secrets set maxmind_license_key
+  python -m jarvis geo update        # downloads GeoLite2-City, checks its SHA-256, validates it
+  python -m jarvis geo where         # where Jarvis thinks you are, and how sure it is
+  python -m jarvis weather --when week
+  ```
+
+  Weather and geocoding are Open-Meteo: free, no key.
+- **Memory.** "Remember my locker is 214", "what's my locker number", "forget the locker thing". Notes are
+  your own sentences, and every conversation is given them.
+- **Reminders.** "Remind me to call mum in 20 minutes / at 6pm / tomorrow at 9". The time it resolved is
+  always said back. **`python -m jarvis.schedule` must be running** — it raises the reminder when it is
+  due and sends it wherever you are (desk, Telegram). `python -m jarvis remind` lists them.
+- **Web search.** Anything current — scores, news, opening hours — via a Google-grounded Gemini call that
+  names its sources. `voice.web_search = false` turns it off.
+
+## Built-in voice
+
+The reader voice (the one that reads options and requirements word for word) no longer needs anything
+installed beyond the OS: **espeak-ng** on Linux, **say** on macOS, **SAPI** on Windows. Kokoro and
+Microsoft's Edge voices are used first when installed; Gemini TTS is last and, being generative, is
+never trusted with exact text. `voice.reader_order` sets the ladder.
+
+```bash
+python -m jarvis say "Option two: SQLite"                # through the speakers
+python -m jarvis say --out test.wav "Merhaba" --lang tr  # or to a file
+```
+
+## When it mishears you
+
+Recognisers hear "coat" or "court" when an accented speaker says "quote". Jarvis corrects that from
+context — "stock coat" becomes "stock quote", "winter coat" stays a coat — and learns from you:
+
+- Say **"no, I said quote"** and it remembers which word it got wrong (it finds it in what you just said).
+- Say **"no, I really said coat"** when a correction was wrong, and it backs off.
+- Put your own words in `voice.vocabulary` (names, jargon, project names): they are given to the
+  recogniser as vocabulary hints and to the model as instructions.
+
+```bash
+python -m jarvis hearing test "get me a stock coat for apple"   # what it would change, and why
+python -m jarvis hearing teach jason json                       # teach a pair by hand
+python -m jarvis hearing list                                   # everything it knows
+```
+
+Two switches, both on by default: `voice.asr_vocabulary` (the recogniser hint, which is read from the SDK
+and **unverified** on the Live server — turn it off if the desk cannot connect) and
+`voice.hearing_arbiter` (doubtful words get a one-word vote from the text model).
 
 ## Speaking a project into existence
 

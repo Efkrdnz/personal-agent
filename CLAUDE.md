@@ -159,9 +159,17 @@ here. Each gap below is one missing caller:
   published from TWO places with incompatible payloads.
 - **Nothing reads the event log at all.** `bus.read_since` and `bus.commit_cursor` — the bus's whole consumer
   API — have no production caller. The hash-chained log is written and never read.
+**General use** (not a gap, a capability, so it is listed): `python -m jarvis chat` is the same assistant
+by text over the Gemini API, with the registry's tools via OUR tool loop (never the SDK's automatic
+calling, which would bypass the channel gate). Weather/place/time (`jarvis/geo`, Open-Meteo + GeoLite2),
+notes and reminders (`jarvis/memory.py`, migration 005; reminders are raised by the scheduler WHEN DUE),
+web search, the OS reader voice (espeak-ng/say/SAPI), and hearing correction (`jarvis/hearing.py`,
+migration 004). The Live recogniser's `custom_vocabulary` is read from the SDK and unverified on the
+server; `voice.asr_vocabulary = false` is the escape hatch.
+
 And the smaller ones: the desk has no wake word, and `DESK.tools` still names `explain_option` and
 `job_control`, which do not exist (`doctor` prints which). `voice.wake_word` and `voice.output_device`
-are config keys nothing reads.
+are config keys nothing reads. Reminders and Telegram both need `python -m jarvis.schedule` running.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is next and what was deliberately cut.
 
