@@ -118,7 +118,7 @@ def migrate(con: sqlite3.Connection, *, migrations_dir: Path | None = None) -> i
         # BEGIN IMMEDIATE. Run the DDL, then bump the version; the bump is what
         # makes it idempotent, and DDL here is CREATE ... IF NOT EXISTS-safe by
         # virtue of only ever running once per version.
-        con.executescript(f.read_text())
+        con.executescript(f.read_text(encoding="utf-8"))
         con.execute(f"PRAGMA user_version={n}")
         version = n
     return version

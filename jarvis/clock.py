@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import os
 from datetime import datetime
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jarvis.ids import parse_ts
 
@@ -25,7 +25,15 @@ DEFAULT_TZ = "Europe/Istanbul"
 
 def local_tz() -> ZoneInfo:
     """The zone Jarvis speaks in. Override with JARVIS_TZ for travel or tests."""
-    return ZoneInfo(os.environ.get("JARVIS_TZ", DEFAULT_TZ))
+    name = os.environ.get("JARVIS_TZ", DEFAULT_TZ)
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError as exc:
+        # Same type, better sentence: on Windows this is a missing tzdata
+        # package, not a misspelt zone, and the traceback should say so.
+        raise ZoneInfoNotFoundError(
+            f"no timezone data for {name!r}. On Windows: uv pip install tzdata"
+        ) from exc
 
 
 def to_local(ts: str | datetime) -> datetime:

@@ -252,7 +252,16 @@ def load(path: str | Path | None = None) -> Config:
     if not p.exists():
         return Config()
 
-    table = tomllib.loads(p.read_text(encoding="utf-8"))
+    try:
+        # utf-8-sig: Windows editors may prepend a byte-order mark, which TOML
+        # rejects as a stray character on line 1.
+        text = p.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"{p} is not UTF-8 (PowerShell's `>` writes UTF-16). Re-save it as UTF-8, "
+            "or recreate it with `python -m jarvis config init --force`."
+        ) from exc
+    table = tomllib.loads(text)
     _reject_secrets(table)
 
     base = Config(

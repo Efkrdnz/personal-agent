@@ -157,6 +157,8 @@ class SubprocessGit:
                 env=env,
                 capture_output=True,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 timeout=timeout if timeout is not None else self.timeout_s,
                 check=False,
             )

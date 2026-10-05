@@ -394,10 +394,61 @@ def pgid_of(pid: int) -> int | None:
     on every POSIX platform including the ones with no ``/proc``, and it cannot
     be fooled by a process name full of parentheses.
     """
-    try:
-        return os.getpgid(pid)
-    except (OSError, ProcessLookupError):
+    getpgid = getattr(os, "getpgid", None)
+    if getpgid is None:
+        # Windows has no POSIX process groups. None makes the kill switch fall
+        # back to the pid, which is what it does for any unrecorded group.
         return None
+    try:
+        return getpgid(pid)
+    except OSError:
+        return None
+
+
+def _pid_exists_windows(pid: int, *, kernel32: Any = None, last_error: Any = None) -> Liveness:
+    """OpenProcess + GetExitCodeProcess. NEVER ``os.kill`` on Windows.
+
+    There, ``os.kill(pid, 0)`` is not a probe: signal 0 is CTRL_C_EVENT, sent to
+    every process on the console, and on CPython 3.11 a failed console event
+    falls through to TerminateProcess. A liveness check that kills the runner it
+    was asked about is the one failure this function must not have. Like the
+    POSIX path it never says "alive" — a pid can be reused.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    k32 = kernel32
+    if k32 is None:
+        # A fresh WinDLL, not ctypes.windll.kernel32: setting argtypes on the
+        # shared one would be process-global state other code could trip over.
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        k32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        k32.OpenProcess.restype = wintypes.HANDLE
+        k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        k32.GetExitCodeProcess.restype = wintypes.BOOL
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    handle = k32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        # 87 is ERROR_INVALID_PARAMETER: no such process. Anything else (5,
+        # access denied) means it exists and is not ours to open.
+        err = (last_error or ctypes.get_last_error)()  # type: ignore[attr-defined]
+        return "dead" if err == 87 else "unknown"
+    try:
+        code = wintypes.DWORD()
+        if not k32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return "unknown"
+        return "unknown" if code.value == _STILL_ACTIVE else "dead"
+    finally:
+        k32.CloseHandle(handle)
+
+
+_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_STILL_ACTIVE = 259
+
+
+def pid_is_gone(pid: int) -> bool:
+    """True only when the process has provably exited. Safe on every OS."""
+    return _pid_exists(pid) == "dead"
 
 
 def _pid_exists(pid: int) -> Liveness:
@@ -407,6 +458,8 @@ def _pid_exists(pid: int) -> Liveness:
     what we asked. This cannot distinguish a reused pid from the original, so it
     never returns "alive"; it is the fallback for platforms with no ``/proc``.
     """
+    if os.name == "nt":
+        return _pid_exists_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

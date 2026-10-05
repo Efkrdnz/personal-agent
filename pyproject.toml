@@ -3,7 +3,10 @@ name = "jarvis"
 version = "0.1.0"
 description = "A voice-first assistant that drives Claude Code"
 requires-python = ">=3.11"
-dependencies = []
+# tzdata on Windows only: CPython there ships no zone database, so
+# ZoneInfo("Europe/Istanbul") raises and the scheduler cannot compute 10:00.
+# zoneinfo loads it lazily as data, so the spine still imports under `python -S`.
+dependencies = ["tzdata; sys_platform == 'win32'"]
 
 [project.optional-dependencies]
 # The Claude Code driver. Pinned: about a third of the payload specifics this

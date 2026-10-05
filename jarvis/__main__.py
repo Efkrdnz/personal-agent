@@ -44,6 +44,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -167,7 +168,17 @@ def _check_config(r: Report, path: str | None) -> cfgmod.Config | None:
         r.add(OK, f"{target}")
     else:
         r.add(WARN, f"{target} does not exist — using defaults ('python -m jarvis config init')")
-    r.add(OK, f"timezone {cfg.tz}, workspace {cfg.workspace_path}")
+    try:
+        import zoneinfo
+
+        zoneinfo.ZoneInfo(cfg.tz)
+        r.add(OK, f"timezone {cfg.tz}, workspace {cfg.workspace_path}")
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        r.add(
+            BAD,
+            f"no timezone data for {cfg.tz!r} — on Windows: uv pip install tzdata "
+            "(the scheduler and every spoken time need it)",
+        )
     r.add(OK, f"claude {cfg.desk.model}, effort {cfg.desk.effort}, mode {cfg.desk.permission_mode}")
     r.add(OK, f"gemini {cfg.voice.model}, voice {cfg.voice.gemini_voice}")
     r.add(
@@ -1614,7 +1625,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         selection = leg.select()
     except DeviceError as exc:
         raise StartupRefused(str(exc)) from exc
-    print(f"{OK}  microphone and speaker: {selection.name}")
+    print(f"{OK}  microphone and speaker: {selection.describe()}")
     turn = TurnController(
         mixer=mixer,
         vad=EnergyVad(),
@@ -1960,7 +1971,22 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
+def _tolerant_output() -> None:
+    """Replace what the console cannot show instead of crashing on it.
+
+    Windows' piped output uses the ANSI code page, which has no box-drawing
+    characters or em dashes; one of those in a doctor line was a
+    UnicodeEncodeError at the very end of the report. ``hasattr`` because
+    under pythonw stdout is None, and tests swap in objects without it.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            with suppress(ValueError, OSError):
+                stream.reconfigure(errors="replace")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
+    _tolerant_output()
     args = build_parser().parse_args(argv)
     if args.command == "secrets" and args.action in ("set", "forget") and not args.name:
         print("which secret? " + ", ".join(s.name for s in secrets.SECRETS), file=sys.stderr)

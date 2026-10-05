@@ -44,11 +44,20 @@ __all__ = [
 MAX_OCCURRENCE_SCAN = 4000
 
 
+#: Said with every unknown zone, because on Windows it is almost always this.
+_TZ_HINT = (
+    "if this is Windows, its Python ships no zone database: uv pip install tzdata "
+    "(or reinstall Jarvis, which now depends on it there)"
+)
+
+
 def zone(tz: str) -> ZoneInfo:
     """The IANA zone, or a ValueError naming the string that was not one."""
     try:
         return ZoneInfo(tz)
-    except (ZoneInfoNotFoundError, ValueError) as exc:
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"unknown timezone {tz!r} — {_TZ_HINT}") from exc
+    except ValueError as exc:
         raise ValueError(f"unknown timezone {tz!r}") from exc
 
 

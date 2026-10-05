@@ -32,7 +32,9 @@ uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,dev]"
 ```
 
 In PowerShell the activate line is `.venv\Scripts\Activate.ps1`. Windows reads aloud with its own SAPI
-voice, so there is nothing else to install.
+voice, so there is nothing else to install. **After every `git pull`, run the install line again**: it is
+how new dependencies arrive (Windows needs `tzdata`, because its Python ships no time-zone database and
+the scheduler cannot compute "10:00 in Istanbul" without one).
 
 Two things that cost an afternoon if you do not know them:
 

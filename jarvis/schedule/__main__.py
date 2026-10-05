@@ -30,6 +30,7 @@ import sqlite3
 import sys
 import time
 from collections.abc import Callable, Sequence
+from contextlib import suppress
 from types import FrameType
 
 from jarvis.clock import DEFAULT_TZ, spoken_time
@@ -162,6 +163,12 @@ def run(
 
 
 def main(argv: Sequence[str] | None = None, *, sleep: Callable[[float], None] = time.sleep) -> int:
+    # A reminder line with a Turkish character must not kill the daemon on a
+    # Windows console whose code page cannot encode it.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            with suppress(ValueError, OSError):
+                stream.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
     try:
         check_at_local(args.at, args.tz)

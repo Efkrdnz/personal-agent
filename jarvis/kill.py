@@ -63,6 +63,7 @@ from jarvis.jobs import (
     Job,
     UnknownJob,
     get,
+    pid_is_gone,
     process_liveness,
     set_state,
     shift_ts,
@@ -650,6 +651,9 @@ def _zombie(pid: int) -> bool:
 
 
 def _gone(pid: int) -> bool:
+    if os.name == "nt":
+        # Never os.kill(pid, 0) on Windows: it is Ctrl+C, not a probe.
+        return pid_is_gone(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -709,7 +713,14 @@ def terminate(
     if liveness == "unknown" and not allow_unknown:
         return "denied"
 
-    group = pgid if pgid and pgid > 0 and pgid != os.getpgrp() else None
+    getpgrp = getattr(os, "getpgrp", None)
+    killpg = getattr(os, "killpg", None)
+    # Windows has neither, and records no pgid; the pid alone is signalled.
+    group = (
+        pgid
+        if pgid and pgid > 0 and getpgrp is not None and killpg is not None and pgid != getpgrp()
+        else None
+    )
 
     def send(sig: int) -> bool:
         """True when the signal reached something. Falls back to the pid.
@@ -720,9 +731,9 @@ def terminate(
         mean the kill switch declaring success over a process it never
         signalled, which is the one lie this module cannot afford.
         """
-        if group is not None:
+        if group is not None and killpg is not None:
             try:
-                os.killpg(group, sig)
+                killpg(group, sig)
             except (ProcessLookupError, PermissionError):
                 pass
             else:
@@ -742,7 +753,8 @@ def terminate(
             return "term"
         time.sleep(poll_s)
 
-    send(signalmod.SIGKILL)
+    # Windows has no SIGKILL; os.kill there is TerminateProcess whatever the signal.
+    send(getattr(signalmod, "SIGKILL", signalmod.SIGTERM))
     # No second wait: SIGKILL is not refusable, and blocking the kill switch on
     # a process stuck in uninterruptible I/O would be the one failure worse than
     # reporting it optimistically.
