@@ -71,6 +71,10 @@ RULES: dict[str, tuple[str, ...]] = {
         # and has a timezone database behind it, none of which may be on the
         # import path of a runner with no schedule at all.
         "jarvis.schedule",
+        # The provider adapter for location and weather. It reaches the network
+        # and an optional binary reader; the spine must keep importing under
+        # `python -S` on a box with neither.
+        "jarvis.geo",
     ),
     # A channel reaches Claude Code through rows in ``requests`` and nothing
     # else. Importing the desk would make it unable to run on a headless box,
@@ -185,6 +189,25 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.audio",
         "jarvis.live",
         "jarvis.telegram",
+    ),
+    # WHERE AND WHAT THE SKY IS DOING: an outward provider adapter, like the
+    # GitHub client. It fetches public JSON and reads a local GeoLite2 file, and
+    # returns data plus the sentence for it. It must not know who asked or who
+    # will speak the answer — the same forecast is said at the desk, sent to
+    # Telegram and printed in the chat — and nothing that decides WHEN anything
+    # happens may be on its import path.
+    "jarvis/geo": (
+        "jarvis.cc",
+        "jarvis.voice",
+        "jarvis.audio",
+        "jarvis.live",
+        "jarvis.telegram",
+        "jarvis.capture",
+        "jarvis.github",
+        "jarvis.project",
+        "jarvis.briefing",
+        "jarvis.schedule",
+        "jarvis.tools",
     ),
     # The desk speaks and listens. Which channel is attached is not its business,
     # and the driver is a process it talks to through the database.

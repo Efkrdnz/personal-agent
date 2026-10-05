@@ -21,7 +21,16 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-__all__ = ["Config", "Voice", "Desk", "Briefing", "load", "default_path", "SecretInConfig"]
+__all__ = [
+    "Briefing",
+    "Config",
+    "Desk",
+    "Location",
+    "SecretInConfig",
+    "Voice",
+    "default_path",
+    "load",
+]
 
 #: Key names that must never appear in the TOML. Matched case-insensitively
 #: against the leaf name, so ``[telegram] token = "..."`` is caught as well as a
@@ -54,13 +63,29 @@ class Voice:
     #: The Live session's own voice. Changing it takes effect on the NEXT session,
     #: because a reconnect would discard the resumption handle mid-conversation.
     gemini_voice: str = "Zephyr"
-    #: The text model that tidies a spoken build request into a requirement list.
-    #: UNVERIFIED: unlike the Live model, which was measured, nobody has yet run
-    #: a real call against this id from this project. It is here rather than in
-    #: code so that a wrong pin is one line of TOML instead of a patch — the
-    #: failure it causes is a 404 at the first real build, which is exactly when
-    #: editing source is least welcome.
-    tidy_model: str = "gemini-3-flash"
+    #: The text model: tidying build requests, the `chat` command, web search.
+    #: Taken from the model enum in the installed google-genai SDK (2.23.0),
+    #: which lists gemini-3.8-flash as the current Flash model — READ, not
+    #: measured: no billed call has been made against it from this project. The
+    #: previous pin, "gemini-3-flash", appears nowhere in that enum (only
+    #: "gemini-3-flash-preview" does), so it would have been a 404. A wrong pin
+    #: here is one line of TOML, which is why it is not in code.
+    text_model: str = "gemini-3.8-flash"
+    #: Gemini's speech model, used by the reader as its last rung. It is a
+    #: generative voice, so it is never trusted with EXACT text (an option label,
+    #: an answer key) until tools/fidelity_probe.py says otherwise.
+    tts_model: str = "gemini-2.5-flash-preview-tts"
+    tts_voice: str = "Kore"
+    #: The reader's ladder, best first. Each rung is tried until one speaks:
+    #: kokoro (local neural), edge (Microsoft, network), system (the OS's own
+    #: voice — espeak-ng, macOS `say`, Windows SAPI), gemini (generative).
+    reader_order: tuple[str, ...] = ("kokoro", "edge", "system", "gemini")
+    #: Let the conversation use Google Search for current facts — news, scores,
+    #: opening hours. Off means it answers from what the model already knows.
+    web_search: bool = True
+    #: Words YOU say that recognisers get wrong: names, jargon, project names.
+    #: They are taught to the live model and to the transcript corrector.
+    vocabulary: tuple[str, ...] = ()
     #: The deterministic reader that speaks load-bearing text. Deliberately a
     #: DIFFERENT voice: "when the other voice speaks, those are somebody else's
     #: exact words" is an audible integrity marker, not a rough edge.
@@ -91,6 +116,32 @@ class Desk:
 
 
 @dataclass(frozen=True, slots=True)
+class Location:
+    """Where "here" is, for the weather and the time.
+
+    All optional. With nothing set, "here" comes from your public IP and the
+    local GeoLite2 database — approximate, and said to be approximate. Setting
+    ``city`` or the coordinates is exact and sends nothing anywhere to find out
+    where you are.
+    """
+
+    city: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
+    #: Look this public address up instead of discovering it. Useful behind a
+    #: VPN that would otherwise put you in another country.
+    ip: str = ""
+    #: Where the GeoLite2 City database lives. Empty means the XDG data dir.
+    geoip_db: str = ""
+    #: Not a secret: it identifies the account, and the LICENCE KEY that goes
+    #: with it lives in the keyring (`secrets set maxmind_license_key`).
+    maxmind_account_id: str = ""
+    units: str = "metric"
+    #: The language place names are given in, where the database has them.
+    language: str = "en"
+
+
+@dataclass(frozen=True, slots=True)
 class Briefing:
     """The morning call."""
 
@@ -106,6 +157,7 @@ class Config:
     voice: Voice = field(default_factory=Voice)
     desk: Desk = field(default_factory=Desk)
     briefing: Briefing = field(default_factory=Briefing)
+    location: Location = field(default_factory=Location)
     #: Where Jarvis speaks from, and the only place a local timezone appears.
     tz: str = "Europe/Istanbul"
     #: Spoken when the running total crosses it. Under a Max subscription the
@@ -148,10 +200,25 @@ def _section(cls: type, table: dict[str, Any], name: str) -> Any:
     indistinguishable from one that does not work.
     """
     fields = {f.name for f in cls.__dataclass_fields__.values()}  # type: ignore[attr-defined]
-    known = {k: v for k, v in table.get(name, {}).items() if k in fields}
-    if "sections" in known and isinstance(known["sections"], list):
-        known["sections"] = tuple(known["sections"])
+    raw = dict(table.get(name, {}))
+    for old, new in _RENAMED.get(name, {}).items():
+        # A key this version renamed. Honoured rather than ignored, because an
+        # ignored setting is indistinguishable from one that does not work.
+        if old in raw and new not in raw:
+            raw[new] = raw.pop(old)
+    known = {k: v for k, v in raw.items() if k in fields}
+    for k, v in known.items():
+        # TOML has arrays and the dataclasses are frozen, so every list becomes
+        # a tuple: a frozen object holding a mutable list is one any caller can
+        # quietly edit.
+        if isinstance(v, list):
+            known[k] = tuple(v)
     return cls(**known)
+
+
+#: Keys a previous version used. ``[voice] tidy_model`` became ``text_model``
+#: when the same model started answering the chat and the web searches too.
+_RENAMED: dict[str, dict[str, str]] = {"voice": {"tidy_model": "text_model"}}
 
 
 def load(path: str | Path | None = None) -> Config:
@@ -174,6 +241,7 @@ def load(path: str | Path | None = None) -> Config:
         voice=_section(Voice, table, "voice"),
         desk=_section(Desk, table, "desk"),
         briefing=_section(Briefing, table, "briefing"),
+        location=_section(Location, table, "location"),
     )
     top = {k: v for k, v in table.items() if k in {"tz", "spend_threshold_usd"}}
     return replace(base, **top) if top else base
@@ -194,9 +262,23 @@ effort = "high"          # 'high' IS the default; low/medium/xhigh/max change be
 
 [voice]
 model = "gemini-3.8-live"
-tidy_model = "gemini-3-flash"   # UNVERIFIED pin; a 404 at your first build means change this
+text_model = "gemini-3.8-flash"   # from the SDK model list; a 404 means change this
 gemini_voice = "Zephyr"
 assume_headset = true    # run tools/aec_bench.py before trusting open speakers
+web_search = true
+# Words recognisers get wrong when YOU say them: names, jargon, project names.
+vocabulary = ["quote", "Jarvis", "Claude Code"]
+
+[location]
+# Leave empty to locate by IP with GeoLite2 (approximate, and said to be).
+# Set a city, or exact coordinates, to be exact and send nothing anywhere.
+city = ""
+# latitude = 41.0082
+# longitude = 28.9784
+units = "metric"
+# For `python -m jarvis geo update`. The licence key goes in the keyring:
+#   python -m jarvis secrets set maxmind_license_key
+maxmind_account_id = ""
 
 [briefing]
 at_local = "10:00"

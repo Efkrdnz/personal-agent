@@ -252,6 +252,9 @@ DESK = SessionProfile(
         "project_status",
         "spend",
         "reachability",
+        "weather",
+        "where_am_i",
+        "local_time",
     ),
 )
 
@@ -272,6 +275,9 @@ PHONE_USER = SessionProfile(
         "project_status",
         "spend",
         "reachability",
+        "weather",
+        "where_am_i",
+        "local_time",
     ),
 )
 

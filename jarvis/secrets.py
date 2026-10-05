@@ -108,6 +108,15 @@ SECRETS: tuple[Secret, ...] = (
         how="message @BotFather on Telegram -> /newbot -> copy the token",
     ),
     Secret(
+        name="maxmind_license_key",
+        env="JARVIS_MAXMIND_LICENSE_KEY",
+        purpose="downloading GeoLite2, so 'where am I' and the local weather work offline",
+        how=(
+            "free account at maxmind.com/en/geolite2/signup -> Manage License Keys -> "
+            "Generate. Put the ACCOUNT ID in config.toml [location] maxmind_account_id"
+        ),
+    ),
+    Secret(
         name="google_oauth_client",
         env="JARVIS_GOOGLE_OAUTH_CLIENT",
         purpose="briefing sections 2 and 4 — Gmail and YouTube comments",

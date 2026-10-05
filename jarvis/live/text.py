@@ -31,13 +31,12 @@ __all__ = ["TEXT_MODEL", "GeminiText", "TextCallFailed"]
 #: LIVE model, a duplex audio endpoint, and asking it for a JSON document is
 #: using the wrong door.
 #:
-#: UNVERIFIED, and said so here rather than discovered at the first real build.
-#: The Live model id in ``jarvis/live/__init__.py`` was MEASURED against a real
-#: connection; this one has not been, and the stale pin it replaced is described
-#: in CLAUDE.md as the single most expensive stale fact in the build sheet. The
-#: caller passes ``voice.tidy_model`` from config.toml, so correcting it is a
-#: line of TOML rather than a patch.
-TEXT_MODEL = "gemini-3-flash"
+#: READ FROM THE SDK, NOT MEASURED. google-genai 2.23.0's own model enum lists
+#: gemini-3.8-flash as the current Flash model; no billed call has been made
+#: against it from here. The previous pin, "gemini-3-flash", is not in that enum
+#: at all. The caller passes ``voice.text_model`` from config.toml, so correcting
+#: it is a line of TOML rather than a patch.
+TEXT_MODEL = "gemini-3.8-flash"
 
 
 class TextCallFailed(RuntimeError):

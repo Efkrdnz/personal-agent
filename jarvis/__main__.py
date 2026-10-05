@@ -161,8 +161,8 @@ def _check_config(r: Report, path: str | None) -> cfgmod.Config | None:
     r.add(OK, f"gemini {cfg.voice.model}, voice {cfg.voice.gemini_voice}")
     r.add(
         WARN,
-        f"tidy model {cfg.voice.tidy_model} — UNVERIFIED; a 404 on your first "
-        f"`build` means change voice.tidy_model in config.toml",
+        f"text model {cfg.voice.text_model} — from the SDK's model list, not yet called "
+        f"from here; a 404 means change voice.text_model in config.toml",
     )
     if not cfg.desk.github_owner:
         r.add(
@@ -281,6 +281,42 @@ def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _check_location(r: Report, cfg: cfgmod.Config | None) -> None:
+    """Never blocking: weather for a NAMED place works with none of this."""
+    import datetime as _dt
+
+    r.section("location")
+    if cfg is None:
+        return
+    loc = cfg.location
+    if loc.latitude is not None and loc.longitude is not None:
+        r.add(OK, f"configured coordinates {loc.latitude}, {loc.longitude} — exact, no lookup")
+        return
+    if loc.city:
+        r.add(OK, f"configured city {loc.city!r} — exact, geocoded once per question")
+        return
+    path = locator_for(cfg).db_path
+    if not _installed("maxminddb"):
+        r.add(
+            WARN, "no city or coordinates set, and maxminddb is missing (pip install -e '.[geo]')"
+        )
+        return
+    if not path.exists():
+        r.add(
+            WARN,
+            f"no GeoLite2 database at {path} — `python -m jarvis geo update`, or set "
+            "[location] city in config.toml",
+        )
+        return
+    age = _dt.datetime.now() - _dt.datetime.fromtimestamp(path.stat().st_mtime)
+    stale = age.days > 30
+    r.add(
+        WARN if stale else OK,
+        f"GeoLite2 at {path}, {age.days} day(s) old"
+        + (" — refresh it: `python -m jarvis geo update`" if stale else ""),
+    )
+
+
 def _check_tool_surface(r: Report) -> None:
     from jarvis.live.profiles import DESK, PHONE_USER
     from jarvis.tools.default import registry
@@ -364,6 +400,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check_database(r, args.db)
     _check_claude_cli(r)
     audio_ok, audio_why = _check_audio(r, cfg)
+    _check_location(r, cfg)
     _check_tool_surface(r)
     _readiness(r, cfg, audio_ok, audio_why)
 
@@ -468,6 +505,30 @@ def cmd_status(args: argparse.Namespace) -> int:
     finally:
         con.close()
     return 0
+
+
+def locator_for(cfg: cfgmod.Config) -> Any:
+    """The process's Locator, from ``[location]``. Wiring only."""
+    from jarvis.geo import Locator, default_db_path
+
+    loc = cfg.location
+    return Locator(
+        city=loc.city,
+        latitude=loc.latitude,
+        longitude=loc.longitude,
+        ip=loc.ip,
+        db_path=Path(loc.geoip_db).expanduser() if loc.geoip_db else default_db_path(),
+        language=loc.language,
+    )
+
+
+def tool_extra(cfg: cfgmod.Config) -> dict[str, Any]:
+    """What every channel's tools get in ``ctx.extra``. One place, so they cannot differ."""
+    return {
+        "spend_threshold_usd": cfg.spend_threshold_usd,
+        "locator": locator_for(cfg),
+        "units": cfg.location.units,
+    }
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
@@ -773,6 +834,64 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+# ───────────────────────────── geo and weather ─────────────────────────────
+
+
+def cmd_geo(args: argparse.Namespace) -> int:
+    """`geo update` downloads GeoLite2; `geo where` says where Jarvis thinks you are."""
+    from jarvis.geo import GeoUnavailable
+    from jarvis.geo.geolite import update
+    from jarvis.tools.builtin import world
+
+    cfg = cfgmod.load(args.config)
+    loc = locator_for(cfg)
+    if args.action == "update":
+        try:
+            path = update(
+                account_id=cfg.location.maxmind_account_id,
+                license_key=secrets.get("maxmind_license_key") or "",
+                dest=loc.db_path,
+            )
+        except GeoUnavailable as exc:
+            print(str(exc), file=sys.stderr)
+            return 2
+        print(f"installed {path} ({path.stat().st_size // 1024} KB)")
+        return 0
+
+    con = db.open_db(args.db)
+    try:
+        ctx = _cli_ctx(con, cfg)
+        print(world.where_am_i(ctx))
+    except Exception as exc:  # noqa: BLE001 - every geo failure is a sentence
+        print(str(exc), file=sys.stderr)
+        return 1
+    finally:
+        con.close()
+    return 0
+
+
+def _cli_ctx(con: sqlite3.Connection, cfg: cfgmod.Config) -> Any:
+    from jarvis.tools.ctx import ToolCtx
+
+    return ToolCtx(con=con, channel="cli", actor="cli", extra=tool_extra(cfg))
+
+
+def cmd_weather(args: argparse.Namespace) -> int:
+    from jarvis.tools.default import registry
+
+    cfg = cfgmod.load(args.config)
+    con = db.open_db(args.db)
+    try:
+        print(
+            registry().dispatch(
+                "weather", {"place": " ".join(args.place), "when": args.when}, _cli_ctx(con, cfg)
+            )
+        )
+    finally:
+        con.close()
+    return 0
+
+
 # ───────────────────────────── build ─────────────────────────────
 
 
@@ -809,7 +928,7 @@ def _builder(args: argparse.Namespace, cfg: cfgmod.Config):
     return Deps(
         model_call=GeminiText(
             api_key=secrets.require("gemini_api_key"),
-            model=cfg.voice.tidy_model,
+            model=cfg.voice.text_model,
             response_schema=spec.RESPONSE_SCHEMA,
         ),
         git=SubprocessGit(),
@@ -1040,7 +1159,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         transcript=transcript,
         questions=questions,
         speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
-        extra={"spend_threshold_usd": cfg.spend_threshold_usd},
+        extra=tool_extra(cfg),
     )
 
     profile: SessionProfile = DESK
@@ -1220,6 +1339,15 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("picks", nargs="*", type=int, help="the option numbers you were read")
     a.add_argument("--text", default=None, help="'none of these' — your own words")
     a.set_defaults(fn=cmd_answer)
+
+    g = sub.add_parser("geo", help="where Jarvis thinks you are; refresh GeoLite2")
+    g.add_argument("action", choices=("where", "update"), nargs="?", default="where")
+    g.set_defaults(fn=cmd_geo)
+
+    w = sub.add_parser("weather", help="the weather, here or somewhere")
+    w.add_argument("place", nargs="*", help="a place; empty for here")
+    w.add_argument("--when", default="now", choices=("now", "today", "tomorrow", "week"))
+    w.set_defaults(fn=cmd_weather)
 
     sub.add_parser("desk", help="listen, talk, and drive Claude Code").set_defaults(fn=cmd_desk)
     return p
