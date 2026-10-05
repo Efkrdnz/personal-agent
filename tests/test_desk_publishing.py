@@ -53,10 +53,10 @@ def kinds(con: sqlite3.Connection) -> list[str]:
 
 class Turn:
     def __init__(self, state: TurnState = TurnState.IDLE, awake: bool = False) -> None:
-        self.state, self._awake = state, awake
+        self.state, self.awake_now = state, awake
 
     def awake(self, at: float | None = None) -> bool:
-        return self._awake
+        raise AssertionError("awake() reads the wall clock; the orb must use awake_now")
 
 
 @pytest.mark.parametrize(
@@ -207,7 +207,7 @@ def test_a_say_command_is_spoken_once_and_acknowledged(con: sqlite3.Connection) 
     assert got is not None and got.state == "done"
 
 
-def test_a_voice_that_fails_is_reported_in_the_ack(con: sqlite3.Connection) -> None:
+def test_a_voice_that_fails_is_reported_in_the_ack_and_the_feed(con: sqlite3.Connection) -> None:
     def broken(text: str) -> None:
         raise RuntimeError("no device")
 
@@ -215,6 +215,8 @@ def test_a_voice_that_fails_is_reported_in_the_ack(con: sqlite3.Connection) -> N
     consume_say_commands(con, broken)
     (ack,) = kill.acks_for(con, cmd.id)
     assert ack.result is not None and ack.result.startswith("failed: RuntimeError: no device")
+    (payload,) = con.execute("SELECT payload FROM events WHERE kind='window.error'").fetchone()
+    assert "no device" in payload
 
 
 def test_a_say_for_another_channel_is_left_alone(con: sqlite3.Connection) -> None:
@@ -324,3 +326,44 @@ def test_the_scheduler_and_telegram_beat() -> None:
     assert "gone" in _calls(_fn(Path(sched.__file__), "main"))
     assert "beat" in _calls(_fn(Path(tg.__file__), "_tick"))
     assert "gone" in _calls(_fn(Path(tg.__file__), "main"))
+
+
+def test_the_orb_reads_the_audio_clock_not_the_wall_clock() -> None:
+    """The review's bug: awake() compared an audio-clock window with time.monotonic()."""
+    import numpy as np
+
+    from jarvis.audio import MIC_RATE, VAD_FRAME
+    from jarvis.audio.mixer import PlaybackMixer
+    from jarvis.audio.turn import RecordingUplink, TurnController
+
+    class Quiet:
+        frame_samples = VAD_FRAME
+
+        def is_speech(self, frame: object) -> bool:
+            return False
+
+        def reset(self) -> None:
+            return None
+
+    mixer = PlaybackMixer(rate=MIC_RATE)
+    turn = TurnController(mixer=mixer, vad=Quiet(), uplink=RecordingUplink(), wake_window_s=20.0)
+    frame = np.zeros(VAD_FRAME, dtype=np.int16)
+    turn.feed(frame, at=1.0)
+    assert desk_state(turn, mixer) == "asleep"
+    turn.wake(1.0)  # stamped on the audio clock, as the wake watch does
+    turn.feed(frame, at=1.032)
+    assert desk_state(turn, mixer) == "awake"
+    turn.feed(frame, at=30.0)  # the window lapsed on the audio clock
+    assert desk_state(turn, mixer) == "asleep"
+
+
+def test_with_no_wake_word_the_desk_is_always_awake() -> None:
+    from jarvis.audio import MIC_RATE
+    from jarvis.audio.mixer import PlaybackMixer
+    from jarvis.audio.turn import RecordingUplink, TurnController
+
+    mixer = PlaybackMixer(rate=MIC_RATE)
+    turn = TurnController(
+        mixer=mixer, vad=SimpleNamespace(frame_samples=512), uplink=RecordingUplink()
+    )
+    assert desk_state(turn, mixer) == "awake"

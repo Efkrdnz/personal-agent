@@ -32,6 +32,7 @@ from typing import Any
 
 from jarvis import kill, liveness
 from jarvis.audio.turn import TurnState
+from jarvis.bus import publish
 
 __all__ = ["SAY_ACTOR", "DeskPublisher", "consume_say_commands", "desk_state"]
 
@@ -51,7 +52,9 @@ def desk_state(turn: Any, mixer: Any) -> str:
         return "speaking"
     if turn.state is TurnState.USER_SPEAKING:
         return "listening"
-    return "awake" if turn.awake() else "asleep"
+    # awake_now, never awake(): the wake window is on the audio clock and
+    # awake() with no argument would compare it with the wall clock.
+    return "awake" if turn.awake_now else "asleep"
 
 
 @dataclass
@@ -155,6 +158,15 @@ def consume_say_commands(
                 result = "said"
             except Exception as exc:  # noqa: BLE001 - the ack is where the failure is told
                 result = f"failed: {type(exc).__name__}: {exc}"
+                # And the feed, which the window renders: an ack row is
+                # invisible, and "I pressed say and nothing happened" is not.
+                publish(
+                    con,
+                    "window.error",
+                    actor,
+                    {"text": f"I couldn't say that out loud: {exc}"},
+                    idem_key=f"cmd:{cmd.id}:say-failed",
+                )
         kill.ack_command(con, cmd.id, actor, result=result, now_ts=now_ts)
         kill.finish_command(con, cmd.id, now_ts=now_ts)
         handled += 1

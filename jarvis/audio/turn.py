@@ -242,6 +242,19 @@ class TurnController:
         now = self._clock() if at is None else at
         return now < self._awake_until
 
+    @property
+    def awake_now(self) -> bool:
+        """Awake as of the last frame fed, on the AUDIO clock. Safe from any thread.
+
+        Not ``awake()`` with no argument: that reads this controller's wall
+        clock, while the wake window is stamped with the graph's sample clock
+        (seconds since the stream opened). Compared with each other they say
+        "asleep" forever, which is what the window's orb showed while the user
+        was talking to it. This is the same flag the wake.awake / wake.asleep
+        events come from, so the orb cannot disagree with the feed.
+        """
+        return True if self.wake_window_s is None else self._was_awake
+
     def wake(self, at: float | None = None) -> None:
         """The wake word was heard. Open the conversation window from now."""
         if self.wake_window_s is None:

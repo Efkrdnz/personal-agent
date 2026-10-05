@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import webbrowser
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -71,6 +72,9 @@ def _open(rec: Recorder, **kw: Any) -> str:
     kw.setdefault("which", nothing_on_path)
     kw.setdefault("exists", only())
     kw.setdefault("env", {})
+    # These tests are about WHICH browser and HOW it is started; the redirect
+    # that keeps the token off the command line has tests of its own below.
+    kw.setdefault("redirect", lambda u: u)
     return open_window(URL, run=rec.run, browser=rec.browser, **kw)
 
 
@@ -185,6 +189,7 @@ def test_a_real_popen_of_a_missing_binary_falls_through(tmp_path) -> None:
         browser=rec.browser,
         env={},
         platform=sys.platform,
+        redirect=lambda u: u,
     )
     assert how == "browser"
     assert rec.opened == [URL]
@@ -301,3 +306,82 @@ def test_every_documented_path_name_is_looked_up(name: str) -> None:
 
     launch.candidates(which=which, exists=only(), env={}, platform="linux")
     assert name in asked
+
+
+# ───────────────────────────── the token stays off the command line ─────────────────────────────
+
+
+TOKEN = "tok_" + "s3cr3t" * 6
+
+
+def test_the_token_never_reaches_a_browser_argv() -> None:
+    """argv is world-readable via /proc on Linux; a review used it to answer a question."""
+    url = f"http://127.0.0.1:5000/#t={TOKEN}"
+    started: list[list[str]] = []
+    opened: list[str] = []
+    for which in (
+        lambda n: "/usr/bin/google-chrome" if n == "google-chrome" else None,
+        lambda n: None,
+    ):
+        how = open_window(
+            url,
+            which=which,
+            exists=only(),
+            env={},
+            platform="linux",
+            run=lambda argv, **kw: started.append(list(argv)),
+            browser=opened.append,
+        )
+        assert how in ("chrome-app", "browser")
+    assert started and opened
+    for argv in started:
+        assert not any(TOKEN in a for a in argv), argv
+    assert not any(TOKEN in u for u in opened)
+    assert all(a.startswith("--app=file://") for argv in started for a in argv[1:2])
+
+
+def test_the_redirect_file_is_private_and_carries_the_url(tmp_path, monkeypatch) -> None:
+    import stat
+    import tempfile
+    from urllib.parse import unquote, urlparse
+
+    from jarvis.window.launch import redirect_file
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    url = f"http://127.0.0.1:5000/#t={TOKEN}"
+    target = redirect_file(url, keep_s=60)
+    path = Path(unquote(urlparse(target).path))
+    assert target.startswith("file://") and TOKEN not in target
+    body = path.read_text(encoding="utf-8")
+    assert f"url={url}" in body and 'http-equiv="refresh"' in body
+    if os.name == "posix":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+
+
+def test_stale_redirect_files_are_swept(tmp_path, monkeypatch) -> None:
+    import tempfile
+    import time as time_
+
+    from jarvis.window.launch import redirect_file
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    old = tmp_path / "jarvis-open-old"
+    old.mkdir()
+    (old / "open.html").write_text("x", encoding="utf-8")
+    past = time_.time() - 3600
+    os.utime(old, (past, past))
+    redirect_file("http://127.0.0.1:1/#t=x", keep_s=60)
+    assert not old.exists()
+
+
+def test_the_redirect_escapes_what_it_writes(tmp_path, monkeypatch) -> None:
+    import tempfile
+    from urllib.parse import unquote, urlparse
+
+    from jarvis.window.launch import redirect_file
+
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    target = redirect_file('http://127.0.0.1:1/#t="><script>x</script>', keep_s=60)
+    body = Path(unquote(urlparse(target).path)).read_text(encoding="utf-8")
+    assert "<script>" not in body
