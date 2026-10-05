@@ -17,11 +17,12 @@
 </head>
 <body>
 
-<div class="netbar" id="netbar" role="status" aria-live="polite">
-  <span class="netbar-text" id="netbar-text">Reconnecting…</span>
-</div>
-
 <div class="app" id="app">
+  <!-- In the flow, not over it: a lost link must not hide the clock or the STOP button. -->
+  <div class="netbar" id="netbar" role="status" aria-live="polite">
+    <span class="netbar-text" id="netbar-text"></span>
+  </div>
+
   <header class="topbar">
     <div class="brand">
       <span class="wordmark">J.A.R.V.I.S.</span>

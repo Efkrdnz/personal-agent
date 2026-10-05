@@ -106,9 +106,7 @@ def test_since_resets_when_a_different_pid_takes_over_the_name(con: sqlite3.Conn
     # A restarted desk: same name, same state, another process.
     body = _row(con, "desk")
     body["pid"] = body["pid"] + 1
-    con.execute(
-        "UPDATE cursors SET value=? WHERE name='alive.desk'", (json.dumps(body),)
-    )
+    con.execute("UPDATE cursors SET value=? WHERE name='alive.desk'", (json.dumps(body),))
     liveness.beat(con, "desk", state="awake", now_ts=T1)
     b = liveness.read(con, "desk", now_ts=T1)
     assert b is not None
@@ -249,3 +247,44 @@ def test_the_module_is_spine_and_imports_without_site_packages() -> None:
         timeout=30,
     )
     assert out.returncode == 0, out.stderr
+
+
+# ───────────────────────────── slow beaters ─────────────────────────────
+
+
+def test_a_process_that_beats_slowly_is_not_called_dead_between_beats() -> None:
+    """The scheduler ticks every 15 s and Telegram long-polls 20: the 10 s rule flickered."""
+    from jarvis.db import connect, migrate
+    from jarvis.liveness import beat, read
+
+    con = connect(":memory:")
+    migrate(con)
+    beat(
+        con, "schedule", state="running", detail={"every_s": 15}, now_ts="2026-10-05T10:00:00.000Z"
+    )
+    assert read(con, "schedule", now_ts="2026-10-05T10:00:14.000Z") is not None
+    assert read(con, "schedule", now_ts="2026-10-05T10:00:44.000Z") is not None
+    assert read(con, "schedule", now_ts="2026-10-05T10:00:46.000Z") is None  # three missed: gone
+    # Its `since` survives a beat 15 s later, because 15 s is not a gap for it.
+    beat(
+        con, "schedule", state="running", detail={"every_s": 15}, now_ts="2026-10-05T10:00:15.000Z"
+    )
+    b = read(con, "schedule", now_ts="2026-10-05T10:00:16.000Z")
+    assert b is not None and b.since == "2026-10-05T10:00:00.000Z"
+
+
+def test_a_nonsense_interval_falls_back_to_the_default() -> None:
+    from jarvis.db import connect, migrate
+    from jarvis.liveness import beat, read
+
+    con = connect(":memory:")
+    migrate(con)
+    for bad in (True, -5, "15", None):
+        beat(
+            con,
+            "telegram",
+            state="running",
+            detail={"every_s": bad},
+            now_ts="2026-10-05T10:00:00.000Z",
+        )
+        assert read(con, "telegram", now_ts="2026-10-05T10:00:11.000Z") is None

@@ -14,8 +14,9 @@ lookups (``which``, ``exists``, ``env``, ``platform``) as arguments and return
 data, so every branch is testable on any OS. :func:`open_window` is the one
 function with a side effect.
 
-NEVER A SHELL. The URL carries the window's token, and a shell would both log it
-and interpret it. The argv is a list handed straight to the process.
+NEVER A SHELL. The URL carries the window's token and is data, while a shell
+reads ``&``, ``#`` and ``|`` as syntax (``cmd`` splits a command line at the
+first ``&``). The argv is a list handed straight to the process.
 """
 
 from __future__ import annotations
@@ -176,9 +177,13 @@ def _detached(platform: str) -> dict[str, Any]:
 def _win_paths(
     table: tuple[tuple[str, tuple[str, ...]], ...], env: Mapping[str, str], exists: Exists
 ) -> list[str]:
+    # Windows variable names are case-insensitive. os.environ honours that, a
+    # plain dict copy of it (keys upper-cased) does not, and the caller may
+    # hand either.
+    folded = {str(k).upper(): v for k, v in env.items()}
     out: list[str] = []
     for var, tail in table:
-        root = env.get(var)
+        root = folded.get(var.upper())
         if root:
             path = ntpath.join(root, *tail)
             if exists(path):

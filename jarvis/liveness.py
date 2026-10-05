@@ -64,6 +64,13 @@ STALE_S = 10.0
 
 _PREFIX = "alive."
 
+#: How many of its own declared intervals a process may miss before it counts
+#: as gone. The scheduler ticks every 15 s and the Telegram bot long-polls for
+#: 20, so the desk's ten-second rule would show both as dead between beats: a
+#: writer says how often it beats (``detail={"every_s": ...}``) and readers
+#: allow three of those.
+_MISSED_BEATS = 3
+
 # The previous beat's `since` is carried forward only when the previous beat is
 # from the same pid, says the same state, and is itself fresh. Anything else —
 # a state change, a restarted process that reused the name, a gap long enough
@@ -137,7 +144,12 @@ def beat(
     )
     con.execute(
         _UPSERT,
-        {"name": key(process), "value": value, "at": at, "fresh_after": _shift(at, -STALE_S)},
+        {
+            "name": key(process),
+            "value": value,
+            "at": at,
+            "fresh_after": _shift(at, -_allowed_age(detail, STALE_S)),
+        },
     )
 
 
@@ -207,9 +219,11 @@ def _to_beat(
         age = (parse_ts(now_ts) - parse_ts(at)).total_seconds()
     except (TypeError, ValueError):
         return None
-    if not isinstance(body, dict) or age > within_s:
+    if not isinstance(body, dict):
         return None
     pid, state, detail, since = (body.get(k) for k in ("pid", "state", "detail", "since"))
+    if age > _allowed_age(detail, within_s):
+        return None
     if not isinstance(pid, int) or isinstance(pid, bool):
         return None
     if state is not None and not isinstance(state, str):
@@ -225,6 +239,14 @@ def _to_beat(
         at=at,
         age_s=max(0.0, age),
     )
+
+
+def _allowed_age(detail: Any, within_s: float) -> float:
+    """The staleness limit for one beat: ``within_s``, or three declared intervals if longer."""
+    every = detail.get("every_s") if isinstance(detail, dict) else None
+    if isinstance(every, (int, float)) and not isinstance(every, bool) and every > 0:
+        return max(within_s, _MISSED_BEATS * float(every))
+    return within_s
 
 
 def _shift(ts: str, seconds: float) -> str:

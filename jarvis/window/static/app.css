@@ -64,13 +64,21 @@ body {
   height: 100%;
 }
 
+/* On <html>, sized to the first screen and never tiled: once the narrow layout
+   scrolls, a repeated gradient shows a hard seam every viewport-height. */
+html {
+  background:
+    radial-gradient(ellipse 70% 60% at 22% 38%, rgba(30, 110, 170, 0.18), transparent 70%) no-repeat,
+    radial-gradient(ellipse 60% 50% at 85% 100%, rgba(20, 70, 120, 0.16), transparent 70%) no-repeat,
+    linear-gradient(180deg, var(--navy), var(--void)) no-repeat,
+    var(--void);
+  background-size: 100% 100vh;
+}
+
 body {
   margin: 0;
   overflow: hidden;
-  background:
-    radial-gradient(ellipse 70% 60% at 22% 38%, rgba(30, 110, 170, 0.18), transparent 70%),
-    radial-gradient(ellipse 60% 50% at 85% 100%, rgba(20, 70, 120, 0.16), transparent 70%),
-    linear-gradient(180deg, var(--navy), var(--void));
+  background: transparent;
   color: var(--text);
   font: 14px/1.5 var(--sans);
   -webkit-font-smoothing: antialiased;
@@ -157,12 +165,13 @@ code {
   position: relative;
   z-index: 1;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100vh;
   height: 100dvh;
 }
 
 .topbar {
+  position: relative;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
@@ -170,6 +179,18 @@ code {
   padding: 10px 18px;
   border-bottom: 1px solid var(--line);
   background: linear-gradient(180deg, rgba(6, 18, 34, 0.92), rgba(4, 11, 21, 0.7));
+}
+
+.topbar::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent 8%, rgba(79, 209, 255, 0.7) 50%, transparent 92%);
+  opacity: 0.55;
+  pointer-events: none;
 }
 
 .brand {
@@ -217,6 +238,11 @@ code {
   background: rgba(6, 16, 30, 0.6);
   font-size: 12px;
   white-space: nowrap;
+}
+
+/* With the link down, the chips are the last thing heard, not the truth now. */
+.app[data-link="retry"] .chips {
+  opacity: 0.45;
 }
 
 .chip-dot {
@@ -457,11 +483,24 @@ code {
 }
 
 .panel-head {
+  position: relative;
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: 12px;
   padding: 12px 16px 10px;
   border-bottom: 1px solid var(--line);
+}
+
+.talk .panel-head::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 8px;
+  top: 100%;
+  height: 26px;
+  background: linear-gradient(180deg, rgba(9, 25, 44, 0.96), rgba(9, 25, 44, 0));
+  pointer-events: none;
 }
 
 .eyebrow {
@@ -849,6 +888,7 @@ code {
   font-size: 11px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
+  white-space: nowrap;
 }
 
 .attention:hover {
@@ -866,6 +906,7 @@ code {
 .readout {
   display: grid;
   grid-template-columns: 82px minmax(0, 1fr);
+  align-content: start;
   gap: 10px;
   padding: 9px 2px;
   border-top: 1px solid var(--line);
@@ -994,6 +1035,11 @@ code {
   opacity: 0.35;
 }
 
+/* No voice to say it with: offer no button that can only fail. */
+.feed[data-speech="off"] .msg-say {
+  display: none;
+}
+
 .icon {
   width: 13px;
   height: 13px;
@@ -1057,6 +1103,25 @@ code {
 .msg-tool .msg-text::before {
   content: "› ";
   color: var(--cyan);
+}
+
+.msg[data-kind="reminder.fired"] .msg-text,
+.msg[data-kind="request.created"] .msg-text,
+.msg[data-kind="job.blocked"] .msg-text,
+.msg[data-kind="job.deferred"] .msg-text {
+  color: var(--amber);
+}
+
+.msg[data-kind="command.issued"] .msg-text,
+.msg[data-kind="job.failed"] .msg-text,
+.msg[data-kind="tool.denied"] .msg-text,
+.msg[data-kind="live.tool_failed"] .msg-text,
+.msg[data-kind="window.error"] .msg-text {
+  color: #ff9aa7;
+}
+
+.msg-system .msg-text {
+  color: #5d7a93;
 }
 
 .thinking {
@@ -1608,9 +1673,17 @@ kbd {
 
 .tool-desc {
   grid-column: 1 / -1;
+  min-width: 0;
+  overflow: hidden;
   font-size: 11.5px;
   color: var(--dim);
   line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.tool[open] .tool-desc {
+  display: none;
 }
 
 .tool-body {
@@ -1655,6 +1728,13 @@ kbd {
   margin: 10px 0 18px;
   padding: 0;
   list-style: none;
+}
+
+/* An empty list takes no room, so its "nothing here" line sits under its heading. */
+.rows:empty,
+.lines:empty,
+.questions:empty {
+  display: none;
 }
 
 .row {
@@ -1821,6 +1901,10 @@ kbd {
   color: var(--cyan-hi);
 }
 
+.q[data-multi="1"] .q-num {
+  border-radius: 3px;
+}
+
 .q-opt[aria-pressed="true"] .q-num {
   border-color: var(--cyan);
   background: var(--cyan);
@@ -1848,9 +1932,15 @@ kbd {
 }
 
 .q-meta {
+  min-width: 0;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--faint);
+}
+
+.q-send {
+  flex: none;
+  white-space: nowrap;
 }
 
 .q textarea {
@@ -1872,7 +1962,7 @@ kbd {
 }
 
 .toast {
-  max-width: 380px;
+  width: min(360px, calc(100vw - 36px));
   padding: 10px 14px;
   border: 1px solid var(--line-hi);
   border-left: 2px solid var(--cyan);
@@ -2056,14 +2146,10 @@ kbd {
 }
 
 .netbar {
-  position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
-  z-index: 50;
-  height: 22px;
+  position: relative;
+  height: 20px;
   overflow: hidden;
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   background: rgba(40, 24, 0, 0.92);
@@ -2074,11 +2160,6 @@ kbd {
   letter-spacing: 0.16em;
   text-transform: uppercase;
   pointer-events: none;
-  opacity: 0;
-  transform: translateY(-100%);
-  transition:
-    opacity 0.2s ease,
-    transform 0.2s ease;
 }
 
 .netbar::after {
@@ -2093,8 +2174,7 @@ kbd {
 }
 
 .netbar.is-on {
-  opacity: 1;
-  transform: none;
+  display: flex;
 }
 
 .netbar.is-on::after {
@@ -2224,11 +2304,23 @@ kbd {
   }
 
   .status-text {
-    width: 150px;
+    width: 168px;
+  }
+
+  .attention {
+    padding: 5px 10px;
+    font-size: 10px;
+    letter-spacing: 0.06em;
   }
 
   .tab {
     padding: 8px 10px 7px;
+  }
+
+  .quick-btn {
+    padding: 6px 4px;
+    font-size: 11.5px;
+    white-space: nowrap;
   }
 
   .tab-label {

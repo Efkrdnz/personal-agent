@@ -448,7 +448,10 @@
     setAttr(dom.link, "data-live", live);
     const words = { live: "live", retry: "reconnecting", connecting: "connecting", off: "offline" };
     setText(dom.linkText, words[mode] || "offline");
+    setAttr(dom.app, "data-link", mode);
     dom.netbar.classList.toggle("is-on", mode === "retry");
+    // The words are written when the bar appears, so a screen reader hears it.
+    setText(dom.netbarText, mode === "retry" ? "Reconnecting…" : "");
   }
 
   // The first nudge arms the timer and later ones ride along. Re-arming on every
@@ -1431,6 +1434,7 @@
     dom.app = byId("app");
     dom.gate = byId("gate");
     dom.netbar = byId("netbar");
+    dom.netbarText = byId("netbar-text");
     dom.link = byId("link");
     dom.linkText = byId("link-text");
     dom.clockTime = byId("clock-time");
