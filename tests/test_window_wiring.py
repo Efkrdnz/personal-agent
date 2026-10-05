@@ -62,6 +62,40 @@ def test_with_the_desk_running_the_desk_is_asked_to_speak(
     assert played == [], "a second output stream while the desk runs is echo"
 
 
+def test_the_say_row_holds_no_secret_and_outlives_a_long_reply(
+    dbpath: Path, con: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jarvis.bus import Redactor
+
+    liveness.beat(con, "desk", state="speaking")
+    secret = "sk-" + "q" * 30
+    speak = cli._window_speaker(Config(), str(dbpath), redactor=Redactor.of([secret]))
+    assert speak(f"the key is {secret}") == "desk"
+    (cmd,) = kill.pending_commands(con, actor="desk", verbs=("say",))
+    assert secret not in cmd.args["text"]
+    row = con.execute("SELECT expires_at, ts FROM commands WHERE id=?", (cmd.id,)).fetchone()
+    assert row is not None
+    from datetime import datetime
+
+    left = datetime.fromisoformat(row["expires_at"]) - datetime.fromisoformat(row["ts"])
+    # A desk mid-reply reads commands only when it stops talking.
+    assert left.total_seconds() >= kill.DEFAULT_TTL_S
+
+
+def test_the_window_shares_one_redactor_between_its_log_and_its_speech() -> None:
+    import ast
+
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.FunctionDef) and n.name == "build_window_services"
+    )
+    src = ast.unparse(fn)
+    assert src.count("desk_redactor()") == 1
+    assert "_window_speaker(cfg, db_path, redactor=redactor)" in src
+
+
 def test_a_desk_that_said_goodbye_is_not_asked(
     dbpath: Path, con: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -160,6 +194,23 @@ def test_no_open_prints_the_full_address_because_the_user_needs_it(
     _, opened, fake = run_window(tmp_path, monkeypatch, "--no-open", "--port", "8765")
     assert opened == []
     assert fake.url in capsys.readouterr().out
+
+
+def test_a_busy_port_is_one_sentence_not_a_traceback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    no_secrets: None,
+) -> None:
+    from jarvis.window import server
+
+    def taken(services: Any, **kw: Any) -> Any:
+        raise OSError(98, "Address already in use")
+
+    monkeypatch.setattr(server, "make_server", taken)
+    assert cli.main(["--db", str(tmp_path / "w.db"), "window", "--port", "8765"]) == 1
+    err = capsys.readouterr().err
+    assert "port 8765 is not free" in err and "Traceback" not in err
 
 
 def test_every_request_gets_its_own_connection(

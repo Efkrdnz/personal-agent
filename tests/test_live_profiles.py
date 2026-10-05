@@ -119,7 +119,7 @@ def test_lookup_by_name_and_alias() -> None:
 def test_changing_voice_produces_a_new_profile_not_a_mutation() -> None:
     other = DESK.with_voice("Puck")
     assert other.voice == "Puck"
-    assert DESK.voice == "Zephyr"
+    assert DESK.voice == "Charon"
     assert other.name == DESK.name
 
 

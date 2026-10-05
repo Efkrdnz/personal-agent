@@ -1,0 +1,240 @@
+name: Windows app
+
+# Builds Jarvis.exe on a real Windows machine, runs the test suite there, and
+# checks the built exe from inside itself (--selftest) before anybody downloads it.
+#
+# DEBUGGED THROUGH ANNOTATIONS. Whoever reads this run may only have the
+# check-run API, which returns annotations and not step logs. So every step
+# tees its output into ci-logs/, and when anything fails the last step turns
+# the end of each file into an ::error annotation (packaging/ci_annotate.py).
+# A green run still leaves the selftest report and the test summary as notices.
+
+on:
+  push:
+    # Both filters: with only `tags`, a branch push would never run this.
+    # Path filters are not applied to tag pushes, so every v* tag builds.
+    branches: ["**"]
+    tags: ["v*"]
+    paths:
+      - "jarvis/**"
+      - "packaging/**"
+      - "tests/**"
+      - "conftest.py"
+      - "pyproject.toml"
+      - ".github/workflows/windows-app.yml"
+  workflow_dispatch:
+
+# A newer push to the same branch makes this run's exe obsolete. A tag is a
+# release and is never cancelled.
+concurrency:
+  group: windows-app-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # The streams only. PYTHONUTF8 is deliberately NOT set: the user's
+      # Windows reads files as cp1252 by default, and so must the tests, or an
+      # open() without encoding= passes here and breaks on their machine.
+      PYTHONIOENCODING: utf-8
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_INPUT: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install
+        id: install
+        run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          New-Item -ItemType Directory -Force -Path ci-logs | Out-Null
+          $log = 'ci-logs/01-install.log'
+          python -m pip install --upgrade pip 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          if ($LASTEXITCODE) { "exit code $LASTEXITCODE" | Add-Content $log; exit $LASTEXITCODE }
+          # dev for pytest; every other extra because the exe carries all of them.
+          python -m pip install -e ".[cc,voice,live,tts,geo,wake,secrets,app,build,dev]" 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log -Append
+          if ($LASTEXITCODE) { "exit code $LASTEXITCODE" | Add-Content $log; exit $LASTEXITCODE }
+          python -m pip list 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log -Append
+
+      # The whole suite, on Windows, reported rather than masked. Not -x: one
+      # run should name every Windows failure, not the first, because each run
+      # costs a quarter of an hour. faulthandler_timeout prints the stack of a
+      # test that hangs, which is otherwise a silent job timeout.
+      - name: Tests
+        id: tests
+        timeout-minutes: 30
+        run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          $log = 'ci-logs/02-pytest.log'
+          python -m pytest -q -rfE --maxfail=30 -o faulthandler_timeout=300 --junitxml=ci-logs/pytest.xml 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          "exit code $code" | Add-Content $log
+          exit $code
+
+      # Built even when a test failed, so one run says whether the EXE works
+      # too. Nothing is released from such a run: the release job needs this
+      # whole job green.
+      - name: Build Jarvis.exe
+        id: build
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+        run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          $log = 'ci-logs/03-pyinstaller.log'
+          python -m PyInstaller packaging/jarvis.spec --noconfirm --clean 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          # What the analyser could not find that jarvis itself imports: the
+          # first place to look when the selftest says a module is missing.
+          $warn = 'build/jarvis/warn-jarvis.txt'
+          if (Test-Path $warn) {
+            Select-String -Path $warn -Pattern '\bjarvis\b' | ForEach-Object { $_.Line } | Set-Content 'ci-logs/04-missing-modules.txt'
+          }
+          if ($code) { "exit code $code" | Add-Content $log; exit $code }
+          if (-not (Test-Path 'dist/Jarvis/Jarvis.exe')) {
+            'dist/Jarvis/Jarvis.exe was not produced' | Tee-Object -FilePath $log -Append
+            exit 1
+          }
+
+      # ADR 0012: openWakeWord's models are CC BY-NC-SA. They are downloaded on
+      # the user's machine and must never ship inside a zip from this repo.
+      - name: No non-commercial wake model inside
+        id: licence
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          $log = 'ci-logs/05-wake-models.log'
+          $bad = Get-ChildItem -Path dist/Jarvis -Recurse -File | Where-Object {
+            $_.Name -match '^(melspectrogram|embedding_model|hey_jarvis.*)\.onnx$' -or $_.FullName -match 'openwakeword'
+          }
+          if ($bad) {
+            "openWakeWord files found in the bundle (ADR 0012):" | Tee-Object -FilePath $log
+            $bad | ForEach-Object { $_.FullName } | Tee-Object -FilePath $log -Append
+            exit 1
+          }
+          "no wake model in dist/Jarvis" | Tee-Object -FilePath $log
+
+      # The built exe checks itself: native libraries load, the data folders
+      # are inside, a database migrates, the window serves over real HTTP, SAPI
+      # speaks. It is a windowed exe with no console, so it writes to
+      # JARVIS_LOG; WaitForExit has a deadline because a modal dialog (an import
+      # failing before logging starts) would otherwise hold the job until its
+      # timeout.
+      - name: Selftest the built exe
+        id: selftest
+        if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+        run: |
+          $log = Join-Path $PWD 'ci-logs/06-selftest.log'
+          $env:JARVIS_LOG = $log
+          $exe = Join-Path $PWD 'dist/Jarvis/Jarvis.exe'
+          $p = Start-Process -FilePath $exe -ArgumentList @('--selftest', '--report', 'ci-logs/selftest.json') -WorkingDirectory $PWD -PassThru
+          $null = $p.Handle  # without this, ExitCode reads as empty once the process is gone
+          if (-not $p.WaitForExit(900000)) {
+            Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
+            'selftest did not finish in 15 minutes (a dialog may be open: an import failed before the log started)' | Add-Content $log
+            exit 1
+          }
+          $code = $p.ExitCode
+          if (Test-Path $log) { Get-Content $log }
+          if (-not (Test-Path 'ci-logs/selftest.json')) { 'no report was written' | Add-Content $log }
+          "exit code $code" | Add-Content $log
+          exit $code
+
+      # Nothing is zipped, so nothing is uploaded, unless the exe passed its
+      # selftest AND the bundle carries no non-commercial model.
+      - name: Zip
+        id: zip
+        if: ${{ !cancelled() && steps.selftest.outcome == 'success' && steps.licence.outcome == 'success' }}
+        run: |
+          $log = 'ci-logs/07-zip.log'
+          # Jarvis.exe at the top of the zip, exactly as in the artifact GitHub
+          # zips from the folder, so one set of instructions fits both.
+          python -c "import shutil; print(shutil.make_archive('Jarvis-Windows-x64', 'zip', 'dist/Jarvis'))" 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          if ($LASTEXITCODE) { "exit code $LASTEXITCODE" | Add-Content $log; exit $LASTEXITCODE }
+          $mb = [math]::Round((Get-Item 'Jarvis-Windows-x64.zip').Length / 1MB, 1)
+          "Jarvis-Windows-x64.zip: $mb MB" | Tee-Object -FilePath $log -Append
+
+      # The FOLDER, not the zip: GitHub zips every artifact itself, and a zip
+      # inside a zip is one more thing to explain to somebody who wanted to
+      # double-click an exe. Download, Extract All, double-click Jarvis.exe.
+      - name: Upload the app
+        if: ${{ !cancelled() && steps.zip.outcome == 'success' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Windows-x64
+          path: dist/Jarvis/
+          if-no-files-found: error
+          retention-days: 30
+
+      # The zip itself, for the release job, only when this is a release.
+      - name: Hand the zip to the release job
+        if: ${{ !cancelled() && steps.zip.outcome == 'success' && startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-zip
+          path: Jarvis-Windows-x64.zip
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      # Two steps, because the runner keeps ten notices per step and a long
+      # report is split across several.
+      - name: Report the selftest
+        if: ${{ !cancelled() && steps.selftest.outcome == 'success' }}
+        run: python packaging/ci_annotate.py notice selftest ci-logs/selftest.json
+
+      - name: Report the test summary and the size
+        if: ${{ !cancelled() && steps.selftest.outcome == 'success' }}
+        run: |
+          python packaging/ci_annotate.py notice pytest ci-logs/02-pytest.log --lines 3
+          python packaging/ci_annotate.py notice zip ci-logs/07-zip.log --lines 1
+
+      - name: Report failed tests as annotations
+        if: ${{ failure() && steps.tests.outcome == 'failure' }}
+        run: python packaging/ci_annotate.py junit ci-logs/pytest.xml
+
+      # The last 60 lines of every captured log and report, one ::error each.
+      - name: Report failures as annotations
+        if: failure()
+        run: python packaging/ci_annotate.py failure ci-logs
+
+      - name: Keep the logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci-logs
+          path: ci-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  # Only from a v* tag, and only when the build job was green end to end. Its
+  # own job so that `contents: write` is never held by a job that runs pip.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-zip
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: >-
+          gh release create "$TAG" Jarvis-Windows-x64.zip
+          --repo "$GITHUB_REPOSITORY" --verify-tag --title "Jarvis $TAG"
+          --notes "Unzip anywhere and double-click Jarvis.exe. First time? See docs/app.md."

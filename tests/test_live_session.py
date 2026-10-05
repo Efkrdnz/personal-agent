@@ -212,7 +212,7 @@ async def test_changing_voice_reconnects_without_losing_the_conversation() -> No
 
     await until(lambda: len(connector.opened) == 2)
     assert connector.handles == [None, "h-voice"]
-    assert connector.voices == ["Zephyr", "Puck"]
+    assert connector.voices == [DESK.voice, "Puck"]
     await session.close()
     await task
 
@@ -675,14 +675,14 @@ async def test_reconnect_can_be_switched_off_for_a_one_shot_leg() -> None:
 async def test_two_sessions_share_nothing() -> None:
     desk_conn = ScriptedConnector(scripts=[[fake.handle("desk-h"), Pause()]], repeat_last=True)
     call_conn = ScriptedConnector(scripts=[[fake.handle("call-h"), Pause()]], repeat_last=True)
-    desk = make_session(desk_conn, profile=DESK, sink=fake.BytesSink())
+    desk = make_session(desk_conn, profile=DESK.with_voice("Puck"), sink=fake.BytesSink())
     call = make_session(call_conn, profile=AGENT_CALL, sink=fake.BytesSink())
     tasks = [asyncio.create_task(desk.run()), asyncio.create_task(call.run())]
 
     await until(lambda: desk.resume_handle == "desk-h" and call.resume_handle == "call-h")
     assert desk.profile.voice != call.profile.voice
     assert desk.profile.tools != call.profile.tools
-    assert desk_conn.voices == ["Zephyr"] and call_conn.voices == ["Charon"]
+    assert desk_conn.voices == ["Puck"] and call_conn.voices == ["Charon"]
 
     await asyncio.gather(desk.close(), call.close())
     await asyncio.gather(*tasks)
@@ -857,7 +857,7 @@ async def test_a_voice_change_on_a_silent_session_still_reconnects() -> None:
     await session.change_voice("Puck")
     await until(lambda: len(connector.opened) == 2)
     assert connector.handles == [None, "h-quiet"]
-    assert connector.voices == ["Zephyr", "Puck"]
+    assert connector.voices == [DESK.voice, "Puck"]
 
     await session.close()
     await task

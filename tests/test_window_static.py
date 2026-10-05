@@ -26,8 +26,9 @@ import jarvis
 STATIC = Path(jarvis.__file__).resolve().parent / "window" / "static"
 FILES = ("index.html", "app.css", "app.js")
 
-#: The whole API surface, from the contract's section 5. The page may call
-#: nothing else, and a test below also insists it calls all of these.
+#: The whole API surface: the window contract's section 5 and the app
+#: contract's section 7. The page may call nothing else, and a test below also
+#: insists it calls all of these.
 ENDPOINTS = frozenset(
     {
         "/api/state",
@@ -38,8 +39,21 @@ ENDPOINTS = frozenset(
         "/api/say",
         "/api/answer",
         "/api/stop",
+        "/api/setup",
+        "/api/setup/secret",
+        "/api/setup/setting",
+        "/api/setup/wake",
+        "/api/setup/preview",
+        "/api/setup/claude",
+        "/api/app",
+        "/api/app/restart",
+        "/api/app/quit",
     }
 )
+
+#: The one page a link may open: where a Gemini key comes from. It opens in
+#: the browser proper (target=_blank), never inside this window.
+NAVIGATION = frozenset({"https://aistudio.google.com/apikey"})
 
 #: The only properties a browser animates on the compositor. Anything else in a
 #: keyframe or a transition repaints every frame of a window left open all day.
@@ -147,11 +161,19 @@ def test_index_declares_a_viewport_and_a_language(tags: _Tags) -> None:
 # ───────────────────────────── what the CSP forbids ─────────────────────────────
 
 
+def _without_navigation(text: str) -> str:
+    """index.html minus the allowed key link's href, which is navigation, not a fetch."""
+    for url in NAVIGATION:
+        text = text.replace(f'href="{url}"', 'href="#"')
+    return text
+
+
 @pytest.mark.parametrize("name", FILES)
 def test_no_external_url_anywhere(name: str) -> None:
     # connect-src, script-src, style-src and font-src are all 'self': an
-    # external URL is not slower, it is blocked.
-    text = _read(name)
+    # external URL is not slower, it is blocked. The one exception is a link a
+    # person clicks to get a key, and only in the page itself.
+    text = _without_navigation(_read(name)) if name == "index.html" else _read(name)
     for pattern in (r"https?://", r"//cdn", r"\bwss?://"):
         hits = re.findall(pattern, text, flags=re.I)
         assert not hits, f"{name} contains {pattern!r}: {hits[:3]}"
@@ -216,8 +238,34 @@ def test_every_contract_endpoint_is_used(js: str) -> None:
     # feature the server offers and the window silently lacks.
     named = set(re.findall(r"""["'`](/api/[A-Za-z0-9_/]*)""", js))
     assert named >= ENDPOINTS, f"never called: {sorted(ENDPOINTS - named)}"
-    for key in ("state", "feed", "stream", "tool", "chat", "say", "answer", "stop"):
+    for key in (
+        "state",
+        "feed",
+        "stream",
+        "tool",
+        "chat",
+        "say",
+        "answer",
+        "stop",
+        "setup",
+        "setupSecret",
+        "setupSetting",
+        "setupWake",
+        "setupPreview",
+        "setupClaude",
+        "appStatus",
+        "appRestart",
+        "appQuit",
+    ):
         assert re.search(rf"\bAPI\.{key}\b", js), f"API.{key} is declared and never used"
+
+
+def test_the_server_serves_every_endpoint_the_page_names(js: str) -> None:
+    # Both halves are this builder's, and a renamed route is a 404 on a click.
+    from jarvis.window import server
+
+    named = set(re.findall(r"""["'`](/api/[A-Za-z0-9_/]*)""", js))
+    assert named <= set(server._ROUTES), sorted(named - set(server._ROUTES))
 
 
 def test_one_fetch_and_it_carries_the_token(js: str) -> None:
@@ -285,11 +333,16 @@ def test_every_quick_action_button_has_a_preset(js: str, tags: _Tags) -> None:
     assert buttons == presets, f"buttons {sorted(buttons)} vs presets {sorted(presets)}"
 
 
-def test_every_tab_has_a_panel(tags: _Tags) -> None:
+def test_every_tab_has_a_panel(tags: _Tags, js: str) -> None:
     tabs = {a["aria-controls"] for t, a in tags.tags if a.get("role") == "tab"}
     panels = {a["id"] for t, a in tags.tags if a.get("role") == "tabpanel"}
     assert tabs == panels
-    assert len(tabs) == 6
+    assert len(tabs) == 7
+    # Settings closes the matrix, and the script knows every tab by name.
+    names = [a["data-tab"] for t, a in tags.tags if a.get("role") == "tab"]
+    assert names[-1] == "settings"
+    m = re.search(r"const TABS = \[([^\]]*)\]", js)
+    assert m and re.findall(r'"([a-z]+)"', m.group(1)) == names
 
 
 def test_the_feed_is_announced_politely(tags: _Tags) -> None:
@@ -358,3 +411,179 @@ def test_every_animation_names_a_keyframe_that_exists(css: str) -> None:
         used.add(m.group(1).split()[0])
     assert used, "no animations; the orb is supposed to move"
     assert used <= frames, f"animation names with no @keyframes: {sorted(used - frames)}"
+
+
+# ───────────────────────────── inside the app: no terminal ─────────────────────────────
+
+
+class _TextScopes(HTMLParser):
+    """Each text node of index.html, with whether an ancestor carries ``data-terminal``."""
+
+    VOID = frozenset({"meta", "link", "input", "br", "img", "hr", "source", "col", "wbr"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[tuple[str, bool]] = []
+        self.texts: list[tuple[str, bool, str]] = []  # (text, inside data-terminal, tag)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in self.VOID:
+            return
+        marked = any(k == "data-terminal" for k, _ in attrs)
+        self.stack.append((tag, marked or (bool(self.stack) and self.stack[-1][1])))
+
+    def handle_endtag(self, tag: str) -> None:
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i][0] == tag:
+                del self.stack[i:]
+                return
+
+    def handle_data(self, data: str) -> None:
+        if data.strip():
+            inside = bool(self.stack) and self.stack[-1][1]
+            self.texts.append((data, inside, self.stack[-1][0] if self.stack else ""))
+
+
+@pytest.fixture(scope="module")
+def scopes(html: str) -> _TextScopes:
+    parser = _TextScopes()
+    parser.feed(html)
+    parser.close()
+    return parser
+
+
+def test_every_terminal_hint_in_the_page_is_marked(scopes: _TextScopes, css: str) -> None:
+    # Inside the app the CSS hides [data-terminal]; a command outside one would
+    # be shown to somebody who double-clicked an icon and has no terminal.
+    loose = [t.strip() for t, inside, tag in scopes.texts if "python -m" in t and not inside]
+    assert loose == [], f"terminal commands not inside a [data-terminal] element: {loose}"
+    assert any("python -m" in t for t, inside, _ in scopes.texts if inside), "the hints vanished"
+    assert re.search(
+        r'html\[data-app="true"\]\s*\[data-terminal\]\s*\{\s*display:\s*none\s*!important', css
+    )
+
+
+def test_the_scripts_commands_live_in_one_table_that_only_answers_outside_the_app(
+    js: str,
+) -> None:
+    start = js.index("const TERMINAL = Object.freeze({")
+    end = js.index("});", start)
+    outside = js[:start] + js[end:]
+    assert "python -m" not in outside, "a terminal command outside the TERMINAL table"
+    assert "python -m" in js[start:end]
+    # Only terminal() reads the table, and it answers "" inside the app.
+    reads = [m.start() for m in re.finditer(r"\bTERMINAL\b", js)]
+    fn = js.index("function terminal(name)")
+    body = js[fn : js.index("}", fn)]
+    assert 'app.inApp ? ""' in body
+    assert all(r == start + len("const ") or fn < r < fn + len(body) for r in reads), reads
+
+
+def test_app_mode_comes_from_the_snapshot_and_reaches_the_css(js: str) -> None:
+    assert "setInApp(s.app === true)" in js
+    assert re.search(r'document\.documentElement\.dataset\.app = on \? "true" : "false"', js)
+
+
+def test_text_from_other_processes_is_stripped_of_commands_in_the_app(js: str) -> None:
+    # Refusals, chat and speech "why" lines, tool results and system feed lines
+    # were written for a terminal; each goes through appText() before display.
+    for needle in (
+        "appText(chat.why",
+        "appText(sp.why",
+        "appText(p.sentence",
+        "appText(text,",
+        "appText(typeof data.said",
+    ):
+        assert needle in js, needle
+
+
+@pytest.mark.parametrize("name", ["_COMMANDISH", "_COMMAND_TAIL", "_STUMP"])
+def test_the_page_and_the_server_strip_commands_by_the_same_rule(js: str, name: str) -> None:
+    from jarvis.window import snapshot
+
+    m = re.search(rf"const {name.lstrip('_')} =\s*/(.+?)/i;", js)
+    assert m, f"{name.lstrip('_')} is not a regex literal in app.js any more"
+    assert m.group(1) == getattr(snapshot, name).pattern
+
+
+# ───────────────────────────── settings and onboarding ─────────────────────────────
+
+
+def test_every_settable_key_has_one_control_of_the_right_kind(tags: _Tags) -> None:
+    from jarvis import config
+
+    controls = {a["data-key"]: a.get("data-kind") for _, a in tags.tags if a.get("data-key")}
+    assert set(controls) == set(config.SETTABLE)
+    kinds = {
+        "bool": "bool",
+        "float": "number",
+        "int": "number",
+        "tuple[str, ...]": "list",
+        "str": "text",
+        "str | None": "text",
+    }
+    for key, kind in controls.items():
+        section, _, field = key.rpartition(".")
+        assert kind == kinds[config._annotation(section, field)], key
+
+
+def test_the_secret_rows_are_the_keys_the_service_stores(js: str) -> None:
+    from jarvis.app.setup import SECRET_NAMES
+
+    block = js[js.index("const SECRET_INFO = {") : js.index("};", js.index("const SECRET_INFO"))]
+    assert re.findall(r"^\s{4}([a-z_]+):", block, flags=re.M) == list(SECRET_NAMES)
+
+
+def test_key_fields_are_password_fields_that_nothing_remembers(tags: _Tags, js: str) -> None:
+    key = next(a for t, a in tags.tags if a.get("id") == "ob-key")
+    assert key.get("type") == "password"
+    assert key.get("autocomplete") == "off" and key.get("spellcheck") == "false"
+    assert 'input.type = "password";' in js
+    # Read once, cleared at once.
+    assert re.search(r'const value = input\.value\.trim\(\);\s*input\.value = "";', js)
+
+
+def test_the_page_never_logs_and_stores_only_its_own_conveniences(js: str) -> None:
+    assert not re.search(r"\bconsole\.", js), "a console call could print a pasted key"
+    keys = set(re.findall(r'writeStore\("(?:local|session)Storage",\s*([A-Z_]+)', js))
+    assert keys <= {"TOKEN_KEY", "SPEAK_KEY", "TAB_KEY", "ONBOARD_KEY"}, keys
+
+
+def test_the_key_link_opens_in_the_browser_proper(tags: _Tags) -> None:
+    links = [a for t, a in tags.tags if t == "a" and str(a.get("href", "")).startswith("http")]
+    assert links, "the onboarding names where a key comes from"
+    for a in links:
+        assert a["href"] in NAVIGATION, a["href"]
+        assert a.get("target") == "_blank"
+        assert {"noopener", "noreferrer"} <= set(str(a.get("rel", "")).split())
+
+
+def test_quit_is_held_like_stop_not_clicked(js: str, tags: _Tags) -> None:
+    quit_btn = next(a for t, a in tags.tags if a.get("id") == "quit")
+    assert "hold-btn" in quit_btn.get("class", "")
+    assert re.search(r"armHold\(\s*dom\.quit,", js)
+    assert re.search(r"armHold\(\s*dom\.stop,", js)
+    # The quit call lives inside armQuit and nowhere else.
+    start = js.index("function armQuit()")
+    assert js.index("API.appQuit") > start
+    assert js.count("API.appQuit") == 1
+
+
+def test_onboarding_opens_on_a_first_run_and_ends_by_starting_the_desk(js: str) -> None:
+    assert re.search(r"setup\.first_run && .*openOnboarding\(\"key\"\)", js)
+    finish = js[js.index("async function finishOnboarding()") :]
+    finish = finish[: finish.index("\n  }\n")]
+    assert 'api(API.appRestart, { process: "desk" })' in finish
+    # Every save during the questions defers the restart to that one at the end.
+    flow = js[js.index("async function obNext()") : js.index("async function finishOnboarding()")]
+    assert flow.count("restart: false") >= 5
+
+
+def test_jarvis_speaks_in_his_own_manner(scopes: _TextScopes, js: str) -> None:
+    said = " ".join(t for t, _, tag in scopes.texts if tag not in ("code", "kbd"))
+    assert "I'm J.A.R.V.I.S." in said and "at your service" in said
+    # Composed: no exclamation marks anywhere he speaks, on the page or in the script.
+    assert "!" not in said
+    strings = re.findall(r'"([^"\n]*)"|`([^`\n]*)`', js)
+    spoken = [a or b for a, b in strings if re.search(r"[A-Za-z]{3,} [a-z]", a or b)]
+    assert not [s for s in spoken if re.search(r"[A-Za-z]!", s)], "an exclamation in a sentence"

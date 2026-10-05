@@ -34,6 +34,7 @@ import array
 import math
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
@@ -41,6 +42,7 @@ from typing import Protocol, runtime_checkable
 __all__ = [
     "CHANNELS",
     "DEFAULT_EDGE_VOICES",
+    "DEFAULT_SAPI_VOICES",
     "RATE",
     "SAMPLE_WIDTH",
     "DEFAULT_SYSTEM_VOICES",
@@ -222,11 +224,23 @@ class FakeEngine:
 #: edge-tts default output is ``audio-24khz-48kbitrate-mono-mp3``: already the
 #: bus rate, so decoding never resamples. ``tr-TR-AhmetNeural`` is the Turkish
 #: voice the architecture picked; the English entry is the FALLBACK below a
-#: local engine, not the primary.
+#: local engine, not the primary. Ryan is a British man, the nearest Edge has to
+#: the butler, and the same default as ``voice.reader_voice`` in the config.
 DEFAULT_EDGE_VOICES: Mapping[str, str] = {
     "tr": "tr-TR-AhmetNeural",
-    "en": "en-US-ChristopherNeural",
+    "en": "en-GB-RyanNeural",
 }
+
+#: CREATE_NO_WINDOW. The app runs with no console, and a console program it
+#: starts (PowerShell, ffmpeg, espeak-ng) would otherwise be given a NEW console
+#: window of its own: a black box flashing up every time Jarvis reads a line.
+_CREATE_NO_WINDOW = 0x08000000
+
+
+def _hidden(platform: str = sys.platform) -> dict[str, int]:
+    """Keyword arguments for every helper process this module starts."""
+    return {"creationflags": _CREATE_NO_WINDOW} if platform == "win32" else {}
+
 
 _FFMPEG_ARGS: tuple[str, ...] = (
     "-hide_banner",
@@ -283,7 +297,7 @@ class EdgeEngine:
         mp3 = (self.fetch or _edge_fetch)(text, voice)
         if not mp3:
             raise EngineFailed(f"{self.name} returned no audio for {voice}")
-        return validate_pcm(self.name, (self.decode or _ffmpeg_decode)(mp3))
+        return validate_pcm(self.name, (self.decode or _mp3_decode)(mp3))
 
 
 def _edge_fetch(text: str, voice: str) -> bytes:
@@ -309,6 +323,52 @@ def _edge_fetch(text: str, voice: str) -> bytes:
         raise EngineFailed(f"edge-tts failed for {voice}: {exc}") from exc
 
 
+def _mp3_decode(mp3: bytes) -> bytes:
+    """MP3 → PCM16 24 kHz mono: ffmpeg when it is on PATH, else miniaudio in-process.
+
+    Windows ships no ffmpeg, so without the second half the British reader voice
+    could never play there. ffmpeg stays first because it is the path that has
+    run longest. With neither, :class:`EngineUnavailable` names both fixes and
+    the ladder moves on to the system voice.
+    """
+    if shutil.which("ffmpeg") is not None:
+        return _ffmpeg_decode(mp3)
+    try:
+        import miniaudio  # noqa: PLC0415 - optional, lazy, like edge_tts
+    except ImportError as exc:
+        raise EngineUnavailable(
+            "MP3 cannot be decoded: put ffmpeg on PATH, or install miniaudio "
+            '(pip install miniaudio, or the ".[tts]" extra)'
+        ) from exc
+    return _miniaudio_decode(mp3, miniaudio)
+
+
+def _miniaudio_decode(mp3: bytes, miniaudio: object) -> bytes:
+    """The in-process decoder. Asked for the bus format, so it is never resampled again.
+
+    ``sample_rate=24000`` and ``nchannels=1`` are requests miniaudio honours by
+    converting; for edge-tts's own 24 kHz mono they are no-ops, as with ffmpeg.
+    miniaudio can also open a device; only its decoder is used, and the rule at
+    the top of this module stands.
+    """
+    try:
+        decoded = miniaudio.decode(  # type: ignore[attr-defined]
+            # bytes(), because its cffi layer refuses a bytearray outright, and
+            # "the download was a bytearray" is not a reason to lose the voice.
+            bytes(mp3),
+            output_format=miniaudio.SampleFormat.SIGNED16,  # type: ignore[attr-defined]
+            nchannels=CHANNELS,
+            sample_rate=RATE,
+        )
+    except Exception as exc:  # noqa: BLE001 - a corrupt download is "next rung", whatever raised
+        raise EngineFailed(f"miniaudio could not decode the MP3: {exc}") from exc
+    samples = array.array("h", decoded.samples)
+    if sys.byteorder != "little":
+        # The bus is little-endian by contract; array.tobytes() is native order.
+        samples.byteswap()
+    return samples.tobytes()
+
+
 def _ffmpeg_decode(mp3: bytes) -> bytes:
     """MP3 → PCM16 24 kHz mono, out of process.
 
@@ -323,6 +383,7 @@ def _ffmpeg_decode(mp3: bytes) -> bytes:
         input=mp3,
         capture_output=True,
         check=False,
+        **_hidden(),
     )
     if proc.returncode != 0:
         raise EngineFailed(f"ffmpeg exited {proc.returncode}: {proc.stderr.decode()[:200]}")
@@ -448,8 +509,23 @@ def to_24k(pcm: bytes, rate: int) -> bytes:
     return out.tobytes()
 
 
-#: The OS voices, per language. espeak-ng names its voices by locale.
-DEFAULT_SYSTEM_VOICES: Mapping[str, str] = {"en": "en-gb", "tr": "tr"}
+#: The OS voices, per language. espeak-ng names its voices by locale, and
+#: ``en-gb-x-rp`` is its Received Pronunciation: the nearest thing it has to a
+#: butler. Present in espeak-ng 1.51 here (``espeak-ng --voices=en``); where it is
+#: not, :data:`_ESPEAK_FALLBACK` asks for plain ``en-gb`` instead.
+DEFAULT_SYSTEM_VOICES: Mapping[str, str] = {"en": "en-gb-x-rp", "tr": "tr"}
+
+#: What to ask for when the preferred espeak voice is refused. espeak-ng itself
+#: resolves an unknown name to the nearest language and speaks anyway; the older
+#: espeak, which has no ``-x-rp`` voices, is the one this is for.
+_ESPEAK_FALLBACK: Mapping[str, str] = {"en-gb-x-rp": "en-gb"}
+
+#: SAPI voices to prefer, best first, each matched as a substring of an
+#: INSTALLED voice's name ("Microsoft George", "Microsoft Hazel Desktop"). The
+#: British man first, because that is the character; then the British woman an
+#: English (UK) language pack brings; then the American man every Windows has.
+#: If none is installed the system default speaks, which is still a voice.
+DEFAULT_SAPI_VOICES: tuple[str, ...] = ("George", "Ryan", "Hazel", "David")
 
 
 def _which_system_tts() -> str | None:
@@ -465,15 +541,33 @@ def _which_system_tts() -> str | None:
 #: Windows SAPI via PowerShell. The text arrives through an ENVIRONMENT VARIABLE,
 #: never through the command line: interpolating a sentence into a PowerShell
 #: script is a code-injection bug the first time somebody dictates a semicolon.
-_SAPI_SCRIPT = (
+#: The voice preferences travel the same way, for the same reason. Three parts
+#: so the middle one can be run on its own against a stand-in synthesiser.
+_SAPI_LOAD = (
     "Add-Type -AssemblyName System.Speech;"
     "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+)
+#: The first INSTALLED, enabled voice whose name contains a preference, in
+#: preference order; nothing matching keeps the default. IndexOf rather than
+#: -like, because a preference is data and -like would read [ ] * ? in it as a
+#: pattern. A voice that refuses SelectVoice is skipped, not fatal.
+_SAPI_PICK = (
+    "$want = @(([string]$env:JARVIS_TTS_VOICES) -split ';'"
+    " | ForEach-Object { $_.Trim() } | Where-Object { $_ });"
+    "$have = @($s.GetInstalledVoices() | Where-Object { $_.Enabled }"
+    " | ForEach-Object { $_.VoiceInfo.Name });"
+    ":pick foreach ($w in $want) { foreach ($h in $have) {"
+    " if ($h.IndexOf($w, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {"
+    " try { $s.SelectVoice($h); break pick } catch { } } } };"
+)
+_SAPI_SPEAK = (
     "$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo("
     "24000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,"
     " [System.Speech.AudioFormat.AudioChannel]::Mono);"
     "$s.SetOutputToWaveFile($env:JARVIS_TTS_OUT, $f);"
     "$s.Speak($env:JARVIS_TTS_TEXT); $s.Dispose()"
 )
+_SAPI_SCRIPT = _SAPI_LOAD + _SAPI_PICK + _SAPI_SPEAK
 
 
 @dataclass(frozen=True, slots=True)
@@ -497,6 +591,15 @@ class SystemEngine:
     voices: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_SYSTEM_VOICES))
     binary: str | None = None
     run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run
+    #: Windows only: which installed SAPI voice to use. See DEFAULT_SAPI_VOICES.
+    sapi_voices: tuple[str, ...] = DEFAULT_SAPI_VOICES
+
+    def __post_init__(self) -> None:
+        for want in self.sapi_voices:
+            if not want.strip() or ";" in want:
+                # ";" separates them on the way to PowerShell, so one inside a
+                # name would quietly become two preferences.
+                raise ValueError(f"a SAPI voice preference must be a plain name, got {want!r}")
 
     def _binary(self) -> str:
         found = self.binary or _which_system_tts()
@@ -524,18 +627,25 @@ class SystemEngine:
         voice = self.voice_for(lang)
         binary = self._binary()
         if binary in ("espeak-ng", "espeak"):
+            return self._espeak(binary, voice, text)
+        return self._via_file(binary, text)
+
+    def _espeak(self, binary: str, voice: str, text: str) -> bytes:
+        why = ""
+        for each in (voice, *((_ESPEAK_FALLBACK[voice],) if voice in _ESPEAK_FALLBACK else ())):
             proc = self.run(
-                [binary, "--stdin", "--stdout", "-v", voice, "-s", "165"],
+                [binary, "--stdin", "--stdout", "-v", each, "-s", "165"],
                 input=text.encode("utf-8"),
                 capture_output=True,
                 timeout=30,
                 check=False,
+                **_hidden(),
             )
-            if proc.returncode != 0 or not proc.stdout:
-                raise EngineFailed(f"{binary} failed: {proc.stderr.decode(errors='replace')[:200]}")
-            pcm, rate = wav_to_pcm(proc.stdout)
-            return validate_pcm(self.name, to_24k(pcm, rate))
-        return self._via_file(binary, text)
+            if proc.returncode == 0 and proc.stdout:
+                pcm, rate = wav_to_pcm(proc.stdout)
+                return validate_pcm(self.name, to_24k(pcm, rate))
+            why = proc.stderr.decode(errors="replace")[:200]
+        raise EngineFailed(f"{binary} failed: {why}")
 
     def _via_file(self, binary: str, text: str) -> bytes:
         import os
@@ -555,10 +665,16 @@ class SystemEngine:
                 shell = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
                 proc = self.run(
                     [shell, "-NoProfile", "-NonInteractive", "-Command", _SAPI_SCRIPT],
-                    env={**os.environ, "JARVIS_TTS_TEXT": text, "JARVIS_TTS_OUT": out},
+                    env={
+                        **os.environ,
+                        "JARVIS_TTS_TEXT": text,
+                        "JARVIS_TTS_OUT": out,
+                        "JARVIS_TTS_VOICES": ";".join(self.sapi_voices),
+                    },
                     capture_output=True,
                     timeout=30,
                     check=False,
+                    **_hidden(),
                 )
             if proc.returncode != 0 or not os.path.exists(out):
                 raise EngineFailed(f"{binary} failed: {proc.stderr.decode(errors='replace')[:200]}")

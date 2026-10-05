@@ -32,7 +32,7 @@ jobs:
       - name: Install
         run: |
           sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng
-          uv venv && uv pip install -e ".[cc,voice,live,geo,wake,dev]"
+          uv venv && uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,app,dev]"
 
       # Runs first and on its own: if a secret pattern has gone inert, that is
       # the most urgent thing in the log, not something to find under a lint dump.

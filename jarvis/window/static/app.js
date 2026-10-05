@@ -19,6 +19,13 @@
   UPDATES ARE KEYED. Lists are reconciled by id: a refresh touches the nodes
   whose text changed and leaves the rest alone, so a half-picked answer or an
   open tool form survives the snapshot arriving underneath it.
+
+  INSIDE THE APP, NO TERMINAL. When the snapshot says this window runs inside
+  the Jarvis app, the app starts and restarts every process itself, and the
+  person looking at this page may never have opened a terminal. Then no line
+  here tells anybody to type a command: every fix is a button. The commands
+  live in one table (TERMINAL) that only answers outside the app, and text
+  written by other processes for a terminal passes through withoutCommands().
 */
 (() => {
   "use strict";
@@ -33,11 +40,30 @@
     say: "/api/say",
     answer: "/api/answer",
     stop: "/api/stop",
+    setup: "/api/setup",
+    setupSecret: "/api/setup/secret",
+    setupSetting: "/api/setup/setting",
+    setupWake: "/api/setup/wake",
+    setupPreview: "/api/setup/preview",
+    setupClaude: "/api/setup/claude",
+    appStatus: "/api/app",
+    appRestart: "/api/app/restart",
+    appQuit: "/api/app/quit",
+  });
+
+  // The only terminal commands on this page, and they answer only outside the
+  // app. A test pins every command in this file to this block.
+  const TERMINAL = Object.freeze({
+    desk: "python -m jarvis desk",
+    schedule: "python -m jarvis.schedule",
+    telegram: "python -m jarvis.telegram",
+    window: "python -m jarvis window",
   });
 
   const TOKEN_KEY = "jarvis.window.token";
   const SPEAK_KEY = "jarvis.window.speakReplies";
   const TAB_KEY = "jarvis.window.tab";
+  const ONBOARD_KEY = "jarvis.window.onboarded";
 
   const FEED_CAP = 300;
   const FEED_FIRST_PAGE = 200;
@@ -46,10 +72,11 @@
   const BACKOFF_FIRST_MS = 1000;
   const BACKOFF_MAX_MS = 15000;
   const TOAST_CAP = 4;
+  const APP_REFRESH_MS = 400;
 
   const DESK_STATES = new Set(["asleep", "awake", "listening", "speaking"]);
   const ROLES = new Set(["user", "jarvis", "system", "tool"]);
-  const TABS = ["tools", "reminders", "notes", "questions", "builds", "hearing"];
+  const TABS = ["tools", "reminders", "notes", "questions", "builds", "hearing", "settings"];
   const TAB_TITLES = {
     tools: "Tools",
     reminders: "Reminders",
@@ -57,21 +84,38 @@
     questions: "Questions",
     builds: "Builds",
     hearing: "Hearing",
+    settings: "Settings",
   };
+  // The tab matrix is four wide; the arrow keys move by its rows.
+  const TAB_ROW = 4;
 
   const PROCS = [
-    { name: "desk", label: "Desk", start: "python -m jarvis desk" },
-    { name: "schedule", label: "Scheduler", start: "python -m jarvis.schedule" },
-    { name: "telegram", label: "Telegram", start: "python -m jarvis.telegram" },
+    { name: "desk", label: "Desk", the: "the desk" },
+    { name: "schedule", label: "Scheduler", the: "the scheduler" },
+    { name: "telegram", label: "Telegram", the: "Telegram" },
   ];
 
   const DESK_WORDS = {
     unknown: "Connecting",
     offline: "Offline",
+    starting: "Starting",
+    waiting: "Waiting",
     asleep: "Asleep",
     awake: "Awake",
     listening: "Listening",
     speaking: "Speaking",
+  };
+
+  // Feed kinds that mean the app's processes changed: re-read what is wrong.
+  const APP_KINDS = new Set(["desk.refused", "app.process_exited", "app.started"]);
+
+  const ONBOARD_STEPS = ["key", "mic", "name", "city", "done"];
+
+  const SECRET_INFO = {
+    gemini_api_key: { label: "Gemini API key", purpose: "My voice and my thinking. Nothing works without it." },
+    telegram_bot_token: { label: "Telegram bot token", purpose: "Questions and answers on your phone." },
+    github_token: { label: "GitHub token", purpose: "Creating a repository before a build starts." },
+    maxmind_license_key: { label: "MaxMind licence key", purpose: "Knowing roughly where you are, offline." },
   };
 
   const KIND_WORDS = {
@@ -155,6 +199,7 @@
     lastSeq: null,
     highSeq: -1,
     stream: null,
+    catchingUp: null,
     backoff: BACKOFF_FIRST_MS,
     reconnectTimer: 0,
     refreshTimer: 0,
@@ -167,6 +212,17 @@
     chatAvailable: false,
     chatBusy: false,
     palette: { all: [], shown: [], active: 0 },
+    // Inside the Jarvis app (the snapshot says so), and what its supervisor says.
+    inApp: false,
+    appProcs: {},
+    appLoaded: false,
+    appTimer: 0,
+    setup: null,
+    setupAvailable: null,
+    tzFilled: false,
+    ob: { open: false, step: "key", wake: "idle", wakeMsg: "" },
+    orbAction: null,
+    deskKnown: false,
   };
 
   const dom = {};
@@ -252,6 +308,56 @@
     }
   }
 
+  // ───────────────────────────── text without commands ─────────────────────────────
+
+  // Other processes write their refusals for a terminal ("store it with python
+  // -m ..."). Inside the app those instructions are wrong — there is a button
+  // for every one — so they are taken out, sentence by sentence. The same rule
+  // as the server's snapshot.plain_sentence, kept in step by a test.
+  const COMMANDISH =
+    /`[^`]*`|\bpython3?(?:\.exe)?\s+-[mc]\b|\bpy\s+-m\b|\bpip\s+install\b|\buv\s+(?:pip|venv|run)\b|\bsudo\b|\bapt(?:-get)?\s+install\b|\bbrew\s+install\b|\.venv\b|\bexport\s+[A-Z_]+=|\bjarvis\s+(?:secrets|wake|desk|window|doctor)\b/i;
+  const COMMAND_TAIL =
+    /\s*(?:[:;\u2014\u2013]|\s-)\s*(?:run|try|use|start it with|store it with|with|or)?\s*:?\s*`?(?:python3?|py|pip|uv|sudo|apt)\b.*$/i;
+  const STUMP = /\b(?:with|run|try|use|using|via|by|to|set|it|is)$/i;
+
+  function lineWithoutCommands(line) {
+    const unparened = line.replace(/\s*\([^()]*\)/g, (m) => (COMMANDISH.test(m) ? "" : m));
+    const kept = [];
+    for (const sentence of unparened.trim().split(/(?<=[.!?])\s+/)) {
+      const cut = sentence.replace(COMMAND_TAIL, "").trim();
+      if (cut !== sentence.trim() && (kept.length || STUMP.test(cut))) continue;
+      if (cut && !COMMANDISH.test(cut)) kept.push(cut);
+    }
+    return kept.join(" ");
+  }
+
+  // Every line, each without its commands: text whose later lines matter (a
+  // week of weather) keeps them, and a line that was only a command goes.
+  function withoutCommands(text) {
+    const out = [];
+    for (const line of String(text || "").split(/\r?\n/)) {
+      if (!COMMANDISH.test(line)) {
+        out.push(line);
+        continue;
+      }
+      const kept = lineWithoutCommands(line);
+      if (kept) out.push(/[.!?…]$/.test(kept) ? kept : `${kept}.`);
+    }
+    return out.join("\n").trim();
+  }
+
+  // What the page shows for text another process wrote: as it is outside the
+  // app, without its terminal instructions inside it.
+  function appText(text, fallback) {
+    const value = String(text || "");
+    if (!app.inApp) return value || fallback || "";
+    return withoutCommands(value) || fallback || "";
+  }
+
+  function terminal(name) {
+    return app.inApp ? "" : TERMINAL[name] || "";
+  }
+
   // ───────────────────────────── time ─────────────────────────────
 
   // The server speaks UTC; the person reading this lives in local time.
@@ -315,7 +421,9 @@
       res = await fetch(path, init);
     } catch {
       throw new ApiError(
-        "The window server is not answering. Is python -m jarvis window still running?",
+        app.inApp
+          ? "Jarvis isn't answering; it may have been closed. Open it again from its icon."
+          : `The window server is not answering. Is ${terminal("window")} still running?`,
         0,
       );
     }
@@ -372,6 +480,7 @@
     app.refreshTimer = 0;
     writeStore("sessionStorage", TOKEN_KEY, null);
     setLink("off");
+    if (dom.onboard) dom.onboard.hidden = true;
     dom.app.setAttribute("inert", "");
     dom.gate.hidden = false;
   }
@@ -473,6 +582,7 @@
     app.refreshing = true;
     try {
       await loadState();
+      await loadApp();
     } catch {
       /* a dead server is the stream's to notice; it already shows the bar */
     } finally {
@@ -496,14 +606,26 @@
     bumpSeq(data.last_seq);
   }
 
-  async function catchUpFeed() {
-    if (app.lastSeq === null) {
-      await loadFeed();
-      return;
-    }
-    const data = await api(`${API.feed}?after=${app.lastSeq}&limit=500`);
-    appendFeed(data.items);
-    bumpSeq(data.last_seq);
+  // Single-flight: a reconnect and a chat reply can both ask at once, and two
+  // reads racing the stream can land out of order.
+  function catchUpFeed() {
+    if (app.catchingUp) return app.catchingUp;
+    app.catchingUp = (async () => {
+      if (app.lastSeq === null) {
+        await loadFeed();
+        return;
+      }
+      const data = await api(`${API.feed}?after=${app.lastSeq}&limit=500`);
+      appendFeed(data.items);
+      bumpSeq(data.last_seq);
+    })().finally(() => {
+      app.catchingUp = null;
+    });
+    return app.catchingUp;
+  }
+
+  function streamIsLive() {
+    return Boolean(app.stream) && app.stream.readyState === EventSource.OPEN;
   }
 
   // ───────────────────────────── keyed lists ─────────────────────────────
@@ -534,6 +656,7 @@
 
   function applySnapshot(s) {
     app.snap = s;
+    setInApp(s.app === true);
     app.speech = s.speech || { available: false, via: null, why: "" };
     applyProcesses(s.processes || {});
     renderReadouts(s);
@@ -551,27 +674,40 @@
   }
 
   function applyProcesses(procs) {
+    const deskWas = isOnline(app.procs.desk);
     app.procs = procs || {};
     for (const p of PROCS) {
       const info = app.procs[p.name] || null;
       const online = isOnline(info);
       const [chip, stateEl] = dom.chips[p.name];
-      const state = online ? String(info.state || "running") : "offline";
+      const sup = app.inApp ? app.appProcs[p.name] || null : null;
+      let state = online ? String(info.state || "running") : "offline";
+      let word = online ? state : "off";
+      if (!online && sup && sup.held) [state, word] = ["held", "waiting"];
+      else if (!online && sup && sup.running) [state, word] = ["starting", "starting"];
       setAttr(chip, "data-online", online);
       setAttr(chip, "data-state", state);
-      setText(stateEl, online ? state : "off");
+      setText(stateEl, word);
       const since = online && info.since ? ` since ${fmtWhen(info.since)}` : "";
-      setAttr(
-        chip,
-        "title",
-        online
-          ? `${p.label} is running — ${state}${since}.`
-          : `${p.label} is not running. Start it with ${p.start}.`,
-      );
+      setAttr(chip, "title", online ? `${p.label} is running — ${state}${since}.` : offTitle(p, sup));
     }
     renderDesk(app.procs.desk || null);
     renderVoice();
-    show(dom.scheduleWarn, !!app.snap && !isOnline(app.procs.schedule));
+    const scheduleDown = !!app.snap && !isOnline(app.procs.schedule);
+    show(dom.scheduleWarn, scheduleDown);
+    const sched = app.appProcs.schedule;
+    show(dom.scheduleRestart, scheduleDown && app.inApp && !!sched && !sched.running);
+    // The desk coming up or going down is when a problem appears or clears.
+    const known = app.deskKnown;
+    app.deskKnown = true;
+    if (known && deskWas !== isOnline(app.procs.desk)) scheduleAppRefresh();
+  }
+
+  function offTitle(p, sup) {
+    if (!app.inApp) return `${p.label} is not running. Start it with ${terminal(p.name)}.`;
+    if (sup && sup.held) return `${p.label} is waiting: ${sup.reason || "see Settings."}`;
+    if (sup && sup.running) return `${p.label} is starting.`;
+    return `${p.label} is not running.`;
   }
 
   function wakeWord() {
@@ -579,38 +715,61 @@
     return String(w || "").replace(/_/g, " ");
   }
 
+  // Not beating, in the app: the supervisor says whether the desk is on its
+  // way up ("starting"), waiting on a fix (a problem card says which), or
+  // stopped. Outside the app, the terminal command is the only way to start it.
   function renderDesk(info) {
     const online = isOnline(info);
     let state = "offline";
     if (!app.snap && !info) state = "unknown";
     else if (online) state = DESK_STATES.has(info.state) ? info.state : "awake";
+    const sup = app.inApp ? app.appProcs.desk || null : null;
+    if (state === "offline" && app.inApp && !(sup && sup.held)) {
+      if (!app.appLoaded || (sup && sup.running)) state = "starting";
+    }
+    const held = state === "offline" && !!sup && sup.held;
     setAttr(dom.orb, "data-state", state);
-    setAttr(dom.status, "data-desk", state);
-    setText(dom.orbState, DESK_WORDS[state]);
-    setText(
-      dom.roDesk,
-      online ? `${DESK_WORDS[state]} since ${fmtWhen(info.since) || "just now"}` : "Not running",
-    );
+    setAttr(dom.status, "data-desk", held ? "held" : state);
+    setText(dom.orbState, DESK_WORDS[held ? "waiting" : state]);
+    let ro = "Not running";
+    if (online) ro = `${DESK_WORDS[state]} since ${fmtWhen(info.since) || "just now"}`;
+    else if (state === "starting") ro = "Starting";
+    else if (held) ro = "Waiting for you";
+    setText(dom.roDesk, ro);
 
-    const key = `${state}|${wakeWord()}`;
+    const key = `${state}|${held}|${wakeWord()}|${app.inApp}`;
     if (dom.orbNote.dataset.key === key) return;
     dom.orbNote.dataset.key = key;
+    setOrbAction(null);
+    if (state === "offline" && !app.inApp) {
+      dom.orbNote.replaceChildren("The desk is not running — start it with ", el("code", "", terminal("desk")));
+      return;
+    }
+    if (held) {
+      setText(dom.orbNote, "I can't start until the problem above is seen to.");
+      return;
+    }
     if (state === "offline") {
-      dom.orbNote.replaceChildren(
-        "The desk is not running — start it with ",
-        el("code", "", "python -m jarvis desk"),
-      );
+      setText(dom.orbNote, "The desk has stopped.");
+      setOrbAction("Restart the desk", (button) => restartProcess("desk", button));
       return;
     }
     const word = wakeWord();
     const notes = {
       unknown: "Reaching the window server…",
+      starting: "Starting the desk. One moment.",
       asleep: word ? `Say “${word}” to wake it.` : "Asleep.",
       awake: "Ready. Speak whenever you like.",
       listening: "Hearing you…",
       speaking: "Talk over it to interrupt.",
     };
     setText(dom.orbNote, notes[state] || "");
+  }
+
+  function setOrbAction(label, run) {
+    app.orbAction = run || null;
+    setText(dom.orbAction, label || "");
+    show(dom.orbAction, !!label);
   }
 
   function renderReadouts(s) {
@@ -641,7 +800,7 @@
   function renderVoice() {
     const sp = app.speech || {};
     let line;
-    if (!sp.available) line = sp.why || "No voice is available.";
+    if (!sp.available) line = appText(sp.why, "No voice is available.");
     else if (isOnline(app.procs.desk)) line = "Speaks through the desk";
     else line = "Speaks here, on this computer";
     setText(dom.roVoice, line);
@@ -658,7 +817,7 @@
     if (!app.chatBusy && dom.chatSend.disabled === can) dom.chatSend.disabled = !can;
     setAttr(dom.chatInput, "placeholder", can ? "Ask Jarvis anything…" : "Chat is unavailable");
     show(dom.chatWhy, !can);
-    setText(dom.chatWhy, can ? "" : chat.why || "Chat is not set up for this window.");
+    setText(dom.chatWhy, can ? "" : appText(chat.why, "Chat is not set up yet; see Settings."));
   }
 
   function setCount(name, n, attention) {
@@ -698,7 +857,7 @@
       li.append(head, el("p", "msg-text", text.trimStart()));
     } else {
       li.dataset.kind = String(item.kind || "");
-      li.append(time, el("span", "msg-text", text));
+      li.append(time, el("span", "msg-text", appText(text, "something needs attention")));
     }
     return li;
   }
@@ -712,6 +871,7 @@
     for (const item of items) {
       if (!item || typeof item.seq !== "number" || item.seq <= app.highSeq) continue;
       app.highSeq = item.seq;
+      if (APP_KINDS.has(item.kind)) scheduleAppRefresh();
       const role = ROLES.has(item.role) ? item.role : "system";
       const text = typeof item.text === "string" ? item.text : "";
       const last = dom.feed.lastElementChild;
@@ -911,13 +1071,17 @@
       const q = QUICK[button.dataset.quick];
       const ok = q.say ? !!(app.speech && app.speech.available) : app.tools.has(q.tool);
       if (button.disabled === ok && button.getAttribute("aria-busy") !== "true") button.disabled = !ok;
-      setAttr(button, "title", ok ? "" : q.say ? app.speech.why || "No voice is available." : `${q.tool} is not offered to this window.`);
+      setAttr(
+        button,
+        "title",
+        ok ? "" : q.say ? appText(app.speech.why, "No voice is available.") : `${q.tool} is not offered to this window.`,
+      );
     }
   }
 
   async function runTool(name, args) {
     const data = await api(API.tool, { name, args });
-    const said = typeof data.said === "string" && data.said ? data.said : "Done.";
+    const said = appText(typeof data.said === "string" ? data.said : "", "Done.");
     setText(dom.resultHead, `${name} · ${clockFmt.format(new Date())}`);
     setText(dom.resultText, said);
     show(dom.result, true);
@@ -946,7 +1110,7 @@
       return await fn();
     } catch (err) {
       if (!(err instanceof ApiError && err.status === 401)) {
-        toast(err && err.message ? err.message : "That did not work.", { tone: "bad", head: "Failed" });
+        toast(appText(err && err.message, "That did not work."), { tone: "bad", head: "Failed" });
       }
       return undefined;
     } finally {
@@ -1204,12 +1368,14 @@
     }
     if (focus) dom.tabs[name].focus();
     writeStore("localStorage", TAB_KEY, name);
+    // Settings read the machine (microphones, the keyring), so only on demand.
+    if (name === "settings" && app.token && !app.locked) loadSetup().catch(() => {});
   }
 
   function onTabKey(e) {
     const current = TABS.indexOf(e.target.dataset.tab);
     if (current < 0) return;
-    const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: 3, ArrowUp: -3 }[e.key];
+    const step = { ArrowRight: 1, ArrowLeft: -1, ArrowDown: TAB_ROW, ArrowUp: -TAB_ROW }[e.key];
     let next = null;
     if (step !== undefined) next = (current + step + TABS.length) % TABS.length;
     else if (e.key === "Home") next = 0;
@@ -1235,7 +1401,7 @@
       await api(API.chat, { text, speak });
       // The reply is already in the log as window.reply. The stream will bring
       // it; this read makes sure it arrives even while the stream is down.
-      await catchUpFeed().catch(() => {});
+      if (!streamIsLive()) await catchUpFeed().catch(() => {});
     } catch (err) {
       if (!dom.chatInput.value) dom.chatInput.value = text;
       if (!(err instanceof ApiError && err.status === 401)) {
@@ -1251,56 +1417,90 @@
 
   // ───────────────────────────── STOP ─────────────────────────────
 
-  // Hold, not click: the button kills every job and call, and a stray click on
-  // a big red button must not be able to do that. Pointer and keyboard both.
-  function armStop() {
+  // Hold, not click: STOP kills every job and call, and Quit ends Jarvis, and a
+  // stray click must be able to do neither. Pointer and keyboard both.
+  // `tooShort` is a sentence for a toast, or a function that says it nearer
+  // the button (a toast would land on top of a button low on the screen).
+  function armHold(button, fire, { head, tooShort }) {
     let timer = 0;
     let started = 0;
 
-    const fire = async () => {
+    const done = () => {
       timer = 0;
-      dom.stop.classList.remove("is-holding");
-      const data = await withBusy(dom.stop, () => api(API.stop, {}));
-      if (!data) return;
-      toast(data.message || "Stopped everything.", { tone: "warn", head: "Stop" });
-      scheduleRefresh();
+      button.classList.remove("is-holding");
+      fire();
     };
     const start = () => {
-      if (timer || dom.stop.disabled || app.locked) return;
+      if (timer || button.disabled || app.locked) return;
       started = performance.now();
-      dom.stop.classList.add("is-holding");
-      timer = setTimeout(fire, HOLD_MS);
+      button.classList.add("is-holding");
+      timer = setTimeout(done, HOLD_MS);
     };
     const cancel = () => {
       if (!timer) return;
       clearTimeout(timer);
       timer = 0;
-      dom.stop.classList.remove("is-holding");
-      if (performance.now() - started < HOLD_MS * 0.6) {
-        toast("Hold Stop for a full second to stop everything.", { tone: "warn", head: "Stop" });
-      }
+      button.classList.remove("is-holding");
+      if (performance.now() - started >= HOLD_MS * 0.6) return;
+      if (typeof tooShort === "function") tooShort();
+      else toast(tooShort, { tone: "warn", head });
     };
 
     // No pointer capture: a captured pointer never "leaves", and sliding off
     // the button is how a person changes their mind halfway through a hold.
-    dom.stop.addEventListener("pointerdown", (e) => {
+    button.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       start();
     });
-    dom.stop.addEventListener("pointerup", cancel);
-    dom.stop.addEventListener("pointercancel", cancel);
-    dom.stop.addEventListener("pointerleave", cancel);
-    dom.stop.addEventListener("keydown", (e) => {
+    button.addEventListener("pointerup", cancel);
+    button.addEventListener("pointercancel", cancel);
+    button.addEventListener("pointerleave", cancel);
+    button.addEventListener("keydown", (e) => {
       if ((e.key === " " || e.key === "Enter") && !e.repeat) {
         e.preventDefault();
         start();
       }
     });
-    dom.stop.addEventListener("keyup", (e) => {
+    button.addEventListener("keyup", (e) => {
       if (e.key === " " || e.key === "Enter") cancel();
     });
-    dom.stop.addEventListener("blur", cancel);
-    dom.stop.addEventListener("contextmenu", (e) => e.preventDefault());
+    button.addEventListener("blur", cancel);
+    button.addEventListener("contextmenu", (e) => e.preventDefault());
+  }
+
+  function armStop() {
+    armHold(
+      dom.stop,
+      async () => {
+        const data = await withBusy(dom.stop, () => api(API.stop, {}));
+        if (!data) return;
+        toast(data.message || "Stopped everything.", { tone: "warn", head: "Stop" });
+        scheduleRefresh();
+      },
+      { head: "Stop", tooShort: "Hold Stop for a full second to stop everything." },
+    );
+  }
+
+  function armQuit() {
+    armHold(
+      dom.quit,
+      async () => {
+        const data = await withBusy(dom.quit, () => api(API.appQuit, {}));
+        if (data) farewell();
+      },
+      { head: "Quit", tooShort: () => nudge(dom.quit.querySelector(".hold-hint"), "keep holding", "hold 1 s") },
+    );
+  }
+
+  // Says something in place for a moment, then puts the old words back.
+  function nudge(node, said, after) {
+    setText(node, said);
+    node.classList.add("is-nudged");
+    clearTimeout(node.nudgeTimer);
+    node.nudgeTimer = setTimeout(() => {
+      setText(node, after);
+      node.classList.remove("is-nudged");
+    }, 1800);
   }
 
   // ───────────────────────────── palette ─────────────────────────────
@@ -1317,6 +1517,14 @@
       run: () => openQuickByName("say"),
     });
     entries.push({ kind: "action", label: "Message Jarvis", hint: "Jump to the chat box", run: () => dom.chatInput.focus() });
+    if (app.setup) {
+      entries.push({
+        kind: "action",
+        label: "Run first-time setup",
+        hint: "The Gemini key, the microphone, how I address you",
+        run: () => openOnboarding("key"),
+      });
+    }
     for (const name of TABS) {
       entries.push({ kind: "section", label: `Open ${TAB_TITLES[name]}`, hint: "", run: () => selectTab(name, true) });
     }
@@ -1428,6 +1636,810 @@
     setTimeout(dismiss, tone === "bad" ? 9000 : 6000);
   }
 
+  // ───────────────────────────── the app ─────────────────────────────
+
+  function setInApp(on) {
+    if (app.inApp === on && document.documentElement.dataset.app !== "unknown") return;
+    app.inApp = on;
+    // CSS hides every [data-terminal] hint while this says "true".
+    document.documentElement.dataset.app = on ? "true" : "false";
+    show(dom.quit, on);
+    // Text already on screen was written for the other mode; redraw it.
+    dom.orbNote.dataset.key = "";
+    if (on && !app.appLoaded) scheduleAppRefresh();
+  }
+
+  // The supervisor's view and what is wrong, read together and debounced: a
+  // refusal arrives as two events (desk.refused, app.process_exited) a few
+  // milliseconds apart, and one read answers both.
+  function scheduleAppRefresh() {
+    if (app.appTimer || app.locked) return;
+    app.appTimer = setTimeout(() => {
+      app.appTimer = 0;
+      loadApp()
+        .then(() => (app.setupAvailable === false ? null : loadSetup()))
+        .catch(() => {});
+    }, APP_REFRESH_MS);
+  }
+
+  async function loadApp() {
+    if (!app.inApp) return;
+    let data;
+    try {
+      data = await api(API.appStatus);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) setInApp(false);
+      return;
+    }
+    app.appProcs = data.processes && typeof data.processes === "object" ? data.processes : {};
+    app.appLoaded = true;
+    applyProcesses(app.procs);
+    renderProcesses();
+  }
+
+  async function loadSetup() {
+    let data;
+    try {
+      data = await api(API.setup);
+    } catch (err) {
+      // 503: this window runs without the app. 404: a server older than this page.
+      if (err instanceof ApiError && (err.status === 503 || err.status === 404)) {
+        app.setupAvailable = false;
+        app.setup = null;
+        renderSetup();
+      }
+      return null;
+    }
+    app.setupAvailable = true;
+    app.setup = data;
+    renderSetup();
+    return data;
+  }
+
+  async function restartProcess(name, button) {
+    const data = await withBusy(button, () => api(API.appRestart, { process: name }));
+    if (!data) return;
+    toast(data.message || "Restarting.", { head: "Jarvis" });
+    await loadApp();
+    scheduleAppRefresh();
+  }
+
+  function procLabel(name) {
+    const p = PROCS.find((x) => x.name === name);
+    return p ? p.label : humanize(name);
+  }
+
+  function procThe(name) {
+    const p = PROCS.find((x) => x.name === name);
+    return p ? p.the : humanize(name);
+  }
+
+  function renderSetup() {
+    const s = app.setup;
+    show(dom.settingsOff, app.setupAvailable === false);
+    show(dom.settingsBody, !!s);
+    const problems = s && Array.isArray(s.problems) ? s.problems : [];
+    renderProblems(problems);
+    setAttr(dom.tabs.settings, "data-attention", problems.length > 0);
+    if (!s) return;
+    renderSettings(s);
+    if (app.ob.open) renderOnboarding();
+  }
+
+  // ───────────────────────────── problems ─────────────────────────────
+
+  // Each problem's button does the fixing; the sentence never says how.
+  function fixFor(action) {
+    const a = String(action || "");
+    if (a === "secret:gemini_api_key") return "Add the Gemini key";
+    if (a.startsWith("secret:")) return `Add the ${(SECRET_INFO[a.slice(7)] || { label: "key" }).label}`;
+    if (a === "wake") return "Download the wake model";
+    if (a === "device") return "Choose a microphone";
+    if (a === "voice") return "Voice settings";
+    if (a.startsWith("restart:")) return `Restart ${procThe(a.slice(8))}`;
+    return "Open settings";
+  }
+
+  function makeProblem() {
+    const card = el("article", "problem");
+    const fix = el("button", "btn problem-fix");
+    fix.type = "button";
+    card.append(el("p", "problem-head"), el("p", "problem-text"), fix);
+    return card;
+  }
+
+  function patchProblem(card, p) {
+    setText(card.children[0], `${procLabel(p.process)} · needs you`);
+    setText(card.children[1], appText(p.sentence, "Something needs your attention."));
+    setText(card.children[2], fixFor(p.action));
+    card.children[2].dataset.action = p.action || "";
+  }
+
+  function renderProblems(list) {
+    const shown = list.slice(0, 3);
+    syncList(dom.problems, shown, (p) => `${p.process}|${p.action}|${p.sentence}`, makeProblem, patchProblem);
+    setAttr(dom.status, "data-problems", shown.length > 0);
+  }
+
+  function runFix(action, button) {
+    const a = String(action || "");
+    if (a.startsWith("secret:")) focusSecret(a.slice(7));
+    else if (a === "wake") downloadWake(button);
+    else if (a === "device") openSettings("set-mic");
+    else if (a === "voice") openSettings("set-gemini-voice");
+    else if (a.startsWith("restart:")) restartProcess(a.slice(8), button);
+    else openSettings();
+  }
+
+  function openSettings(focusId) {
+    selectTab("settings", !focusId);
+    if (!focusId) return;
+    // The settings arrive with the read selectTab starts; focus once they have.
+    const target = byId(focusId);
+    if (target) {
+      target.scrollIntoView({ block: "center" });
+      target.focus();
+    }
+  }
+
+  function focusSecret(name) {
+    if (name === "gemini_api_key" && app.setup && !app.setup.secrets.gemini_api_key) {
+      openOnboarding("key");
+      return;
+    }
+    selectTab("settings", false);
+    const row = Array.from(dom.secretList.children).find((r) => r.dataset.key === name);
+    if (!row) return;
+    openSecretForm(row);
+    row.scrollIntoView({ block: "center" });
+  }
+
+  async function downloadWake(button) {
+    const data = await withBusy(button, () => api(API.setupWake, {}));
+    if (!data) return;
+    toast(data.message || "The wake-word model is in place.", { head: "Wake word" });
+    scheduleAppRefresh();
+  }
+
+  // ───────────────────────────── settings ─────────────────────────────
+
+  function asPairs(options) {
+    return options.map((o) => (Array.isArray(o) ? o : [String(o), String(o)]));
+  }
+
+  // Rebuilt only when the options change, and never under the user's hand.
+  function fillSelect(select, options, value) {
+    const pairs = asPairs(options);
+    const want = value === undefined || value === null ? "" : String(value);
+    if (!pairs.some(([v]) => v === want)) pairs.unshift([want, want || "—"]);
+    const sig = JSON.stringify(pairs);
+    if (select.dataset.sig !== sig) {
+      select.dataset.sig = sig;
+      select.replaceChildren(...pairs.map(([v, label]) => option(v, label)));
+    }
+    if (document.activeElement !== select && select.value !== want) select.value = want;
+  }
+
+  function setField(input, value) {
+    if (document.activeElement === input) return;
+    if (input.type === "checkbox") {
+      if (input.checked !== !!value) input.checked = !!value;
+      return;
+    }
+    const v = Array.isArray(value)
+      ? value.join(input.tagName === "TEXTAREA" ? "\n" : ", ")
+      : value === undefined || value === null
+        ? ""
+        : String(value);
+    if (input.value !== v) input.value = v;
+  }
+
+  function wakeLabel(word) {
+    if (!word) return "None — always listening";
+    const said = String(word).replace(/_/g, " ").replace(/\bjarvis\b/i, "Jarvis");
+    return `“${said.charAt(0).toUpperCase()}${said.slice(1)}”`;
+  }
+
+  const REGIONS = { GB: "British", US: "American", IE: "Irish", AU: "Australian", CA: "Canadian", IN: "Indian", TR: "Turkish" };
+
+  // "en-GB-RyanNeural" -> "Ryan · British". Anything else is shown as it is.
+  function readerLabel(name) {
+    const m = /^([a-z]{2})-([A-Z]{2})-([A-Za-z]+?)(?:Multilingual)?Neural$/.exec(String(name));
+    if (!m) return String(name);
+    return `${m[3]} · ${REGIONS[m[2]] || `${m[1]}-${m[2]}`}`;
+  }
+
+  function makeSegment(value, label) {
+    const b = el("button", "seg", label);
+    b.type = "button";
+    b.setAttribute("role", "radio");
+    b.dataset.value = value;
+    return b;
+  }
+
+  function fillSegments(box, pairs, value) {
+    const sig = JSON.stringify(pairs);
+    if (box.dataset.sig !== sig) {
+      box.dataset.sig = sig;
+      box.replaceChildren(...pairs.map(([v, label]) => makeSegment(v, label)));
+    }
+    for (const b of box.children) setAttr(b, "aria-checked", b.dataset.value === value);
+  }
+
+  function addressPairs(choices) {
+    return choices.map((a) => [a, a.charAt(0).toUpperCase() + a.slice(1)]);
+  }
+
+  function renderSettings(s) {
+    const v = s.settings || {};
+    const c = s.choices || {};
+    const can = s.can || {};
+    fillSelect(dom.setGeminiVoice, c["voice.gemini_voice"] || [], v["voice.gemini_voice"]);
+    fillSelect(
+      dom.setReaderVoice,
+      (c["voice.reader_voice"] || []).map((n) => [n, readerLabel(n)]),
+      v["voice.reader_voice"],
+    );
+    const devices = Array.isArray(s.devices) ? s.devices : [];
+    const mic = String(v["voice.input_device"] || "");
+    const mics = [["", "System default"], ...devices.map((d) => [d.label, d.label])];
+    if (mic && !devices.some((d) => d.label === mic)) mics.push([mic, `${mic} (not connected)`]);
+    fillSelect(dom.setMic, mics, mic);
+    setText(
+      dom.setMicHint,
+      s.devices_why
+        ? appText(s.devices_why, "I couldn't list the microphones.")
+        : "Only devices that can both listen and speak are listed. A headset is ideal.",
+    );
+    const words = Array.isArray(c["voice.wake_word"]) ? c["voice.wake_word"] : ["hey_jarvis", ""];
+    fillSelect(dom.setWakeWord, words.map((w) => [w, wakeLabel(w)]), v["voice.wake_word"]);
+    const wake = s.wake || {};
+    setText(dom.wakePill, !wake.word ? "not needed" : wake.ready ? "model ready" : "model missing");
+    setAttr(dom.wakePill, "data-tone", !wake.word || wake.ready ? "done" : "warn");
+    show(dom.wakeDownload, !!wake.word && !wake.ready);
+    setText(dom.wakeLicence, wake.word ? wake.licence || "" : "");
+    setField(dom.setWakeThreshold, v["voice.wake_threshold"]);
+    setText(dom.setWakeOut, Number(dom.setWakeThreshold.value).toFixed(2));
+
+    const addresses = Array.isArray(c["persona.address"]) ? c["persona.address"] : ["sir", "ma'am", "boss"];
+    const address = String(v["persona.address"] || "");
+    fillSegments(dom.setAddress, addressPairs(addresses.filter((a) => ["sir", "ma'am", "boss"].includes(a))), address);
+    setField(dom.setAddressOther, ["sir", "ma'am", "boss"].includes(address) ? "" : address);
+    setField(dom.setName, v["persona.name"]);
+    setField(dom.setCity, v["location.city"]);
+    fillSelect(dom.setUnits, [["metric", "Metric (°C)"], ["imperial", "Imperial (°F)"]], v["location.units"]);
+    setField(dom.setTz, v.tz);
+    setField(dom.setVocab, v["voice.vocabulary"]);
+    setField(dom.setLangs, v["voice.languages"]);
+    setField(dom.setAutostart, v["app.start_with_windows"]);
+    setField(dom.setTelegram, v["app.start_telegram"]);
+    setField(dom.setOpenWindow, v["app.open_window_on_start"]);
+    if (dom.setAutostart.disabled === !!can.autostart) dom.setAutostart.disabled = !can.autostart;
+    setAttr(
+      dom.setAutostart.closest("label"),
+      "title",
+      can.autostart ? "" : "Starting with Windows isn't available on this computer.",
+    );
+    if (dom.previewVoice.disabled === !!can.preview) dom.previewVoice.disabled = !can.preview;
+    if (dom.claudeSignin.disabled === !!can.claude) dom.claudeSignin.disabled = !can.claude;
+    setAttr(dom.previewVoice, "title", can.preview ? "Play a sample" : "Samples need the Gemini key");
+    renderSecrets(s.secrets || {});
+    renderProcesses();
+    fillTimeZones();
+  }
+
+  // The browser already knows every zone name; the list costs no request.
+  function fillTimeZones() {
+    if (app.tzFilled) return;
+    app.tzFilled = true;
+    let zones = [];
+    try {
+      zones = Intl.supportedValuesOf("timeZone");
+    } catch {
+      zones = [];
+    }
+    dom.tzList.replaceChildren(...zones.map((z) => option(z, z)));
+  }
+
+  function readField(input) {
+    const kind = input.dataset.kind;
+    if (kind === "bool") return input.checked;
+    if (kind === "number") return Number(input.value);
+    if (kind === "list") {
+      return input.value
+        .split(/[\n,]/)
+        .map((x) => x.trim())
+        .filter(Boolean);
+    }
+    return input.value.trim();
+  }
+
+  function savedLine(data) {
+    if (data.note) return `Saved. ${data.note}`;
+    const r = Array.isArray(data.restarted) ? data.restarted : [];
+    if (r.length) return `Saved. Restarting ${r.map(procThe).join(" and ")} to use it.`;
+    return "Saved.";
+  }
+
+  // A plain save is marked on its row; a toast only when something else
+  // happens because of it (a restart, a "next time").
+  async function saveSetting(key, value, { restart = true, quiet = false } = {}) {
+    const data = await api(API.setupSetting, { key, value, restart });
+    const line = savedLine(data);
+    if (!quiet && line !== "Saved.") toast(line, { head: "Settings" });
+    return data;
+  }
+
+  async function saveField(input) {
+    const key = input.dataset.key;
+    if (!key) return;
+    const value = readField(input);
+    if (key === "persona.address" && !value) return; // the segments hold the choice
+    const row = input.closest(".set-row, .set-switch");
+    input.setAttribute("aria-busy", "true");
+    try {
+      await saveSetting(key, value);
+      if (row) flash(row);
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401)) {
+        toast(appText(err.message, "That was not saved."), { tone: "bad", head: "Not saved" });
+      }
+    } finally {
+      input.removeAttribute("aria-busy");
+    }
+    // Re-read either way: on success it shows what was stored, on failure it
+    // puts back what is really there.
+    await loadSetup();
+  }
+
+  // A brief mark on the row that changed, by opacity alone.
+  function flash(node) {
+    node.classList.remove("is-saved");
+    requestAnimationFrame(() => node.classList.add("is-saved"));
+    setTimeout(() => node.classList.remove("is-saved"), 1400);
+  }
+
+  function makeSecretRow(item) {
+    const li = el("li", "secret");
+    const head = el("div", "secret-head");
+    const toggle = el("button", "btn btn-quiet secret-toggle");
+    toggle.type = "button";
+    head.append(el("span", "secret-name", item.label), el("span", "pill secret-state"), toggle);
+    const form = el("form", "secret-form");
+    form.autocomplete = "off";
+    form.hidden = true;
+    const input = el("input", "set-input");
+    input.type = "password";
+    input.id = `secret-input-${item.name}`;
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.maxLength = 4096;
+    input.placeholder = "paste it here";
+    input.setAttribute("aria-label", item.label);
+    const save = el("button", "btn btn-primary", "Store");
+    save.type = "submit";
+    const cancel = el("button", "btn btn-quiet secret-cancel", "Cancel");
+    cancel.type = "button";
+    form.append(input, save, cancel);
+    li.append(head, el("span", "set-hint", item.purpose), form);
+    return li;
+  }
+
+  function patchSecretRow(li, item) {
+    const state = li.querySelector(".secret-state");
+    setText(state, item.present ? "stored" : "not set");
+    setAttr(state, "data-tone", item.present ? "live" : item.name === "gemini_api_key" ? "warn" : "done");
+    setText(li.querySelector(".secret-toggle"), item.present ? "Replace" : "Add");
+  }
+
+  function renderSecrets(present) {
+    const items = Object.keys(SECRET_INFO).map((name) => ({
+      name,
+      label: SECRET_INFO[name].label,
+      purpose: SECRET_INFO[name].purpose,
+      present: present[name] === true,
+    }));
+    syncList(dom.secretList, items, (x) => x.name, makeSecretRow, patchSecretRow);
+  }
+
+  function openSecretForm(li) {
+    const form = li.querySelector(".secret-form");
+    form.hidden = false;
+    li.querySelector(".secret-toggle").hidden = true;
+    form.querySelector("input").focus();
+  }
+
+  function closeSecretForm(li) {
+    const form = li.querySelector(".secret-form");
+    form.querySelector("input").value = "";
+    form.hidden = true;
+    li.querySelector(".secret-toggle").hidden = false;
+  }
+
+  // The value is read once, cleared from the field at once, and sent. It is
+  // never kept, logged or written anywhere by this page.
+  async function storeSecret(name, input, button, { restart = true } = {}) {
+    const value = input.value.trim();
+    input.value = "";
+    if (!value) {
+      toast("Paste the key first.", { tone: "warn", head: "Keys" });
+      return false;
+    }
+    const data = await withBusy(button, () => api(API.setupSecret, { name, value, restart }));
+    if (!data) return false;
+    const r = Array.isArray(data.restarted) && data.restarted.length;
+    toast(r ? "Stored in the keyring. Restarting what uses it." : "Stored in the keyring.", { head: "Keys" });
+    await loadSetup();
+    return true;
+  }
+
+  function onSecretClick(e) {
+    const li = e.target.closest(".secret");
+    if (!li) return;
+    if (e.target.closest(".secret-toggle")) openSecretForm(li);
+    else if (e.target.closest(".secret-cancel")) closeSecretForm(li);
+  }
+
+  async function onSecretSubmit(e) {
+    e.preventDefault();
+    const li = e.target.closest(".secret");
+    if (!li) return;
+    const ok = await storeSecret(li.dataset.key, li.querySelector("input"), e.target.querySelector('[type="submit"]'));
+    if (ok) closeSecretForm(li);
+  }
+
+  function makeProcRow() {
+    const li = el("li", "proc");
+    const restart = el("button", "btn btn-quiet proc-restart", "Restart");
+    restart.type = "button";
+    li.append(
+      el("span", "proc-dot"),
+      el("span", "proc-name"),
+      el("span", "proc-state"),
+      restart,
+      el("span", "proc-reason"),
+      el("span", "proc-log"),
+    );
+    return li;
+  }
+
+  function patchProcRow(li, x) {
+    const beat = x.beat;
+    const info = x.info;
+    let state = "stopped";
+    let words = info.last_exit !== null && info.last_exit !== undefined ? `stopped (exit ${info.last_exit})` : "stopped";
+    if (isOnline(beat)) [state, words] = ["online", String(beat.state || "running")];
+    else if (info.held) [state, words] = ["held", "waiting for you"];
+    else if (info.running) [state, words] = ["starting", "starting"];
+    const extra = [];
+    if (info.pid) extra.push(`pid ${info.pid}`);
+    if (info.restarts) extra.push(`restarted ${info.restarts}×`);
+    setAttr(li, "data-state", state);
+    setText(li.children[1], x.label);
+    setText(li.children[2], [words, ...extra].join(" · "));
+    setAttr(li.children[3], "aria-label", `Restart ${procThe(x.name)}`);
+    setText(li.children[4], info.reason ? appText(info.reason, "") : "");
+    show(li.children[4], !!info.reason);
+    setText(li.children[5], info.log ? `log: ${info.log}` : "");
+    show(li.children[5], !!info.log);
+  }
+
+  function renderProcesses() {
+    show(dom.setProcesses, app.inApp && app.appLoaded);
+    if (!app.inApp) return;
+    const items = PROCS.filter((p) => app.appProcs[p.name]).map((p) => ({
+      name: p.name,
+      label: p.label,
+      info: app.appProcs[p.name],
+      beat: app.procs[p.name] || null,
+    }));
+    syncList(dom.procList, items, (x) => x.name, makeProcRow, patchProcRow);
+  }
+
+  async function previewVoice() {
+    const voice = dom.setGeminiVoice.value;
+    const data = await withBusy(dom.previewVoice, () => api(API.setupPreview, { voice }));
+    if (data) toast(data.message || `Playing ${voice}.`, { head: "Voice" });
+  }
+
+  async function signInClaude() {
+    const data = await withBusy(dom.claudeSignin, () => api(API.setupClaude, {}));
+    if (data) toast(data.message || "The sign-in is open.", { head: "Claude Code" });
+  }
+
+  function onAddressClick(e) {
+    const b = e.target.closest(".seg");
+    if (!b || b.getAttribute("aria-checked") === "true") return;
+    for (const x of dom.setAddress.children) setAttr(x, "aria-checked", x === b);
+    dom.setAddressOther.value = "";
+    saveSetting("persona.address", b.dataset.value)
+      .then(() => loadSetup())
+      .catch((err) => toast(appText(err.message, "That was not saved."), { tone: "bad", head: "Not saved" }));
+  }
+
+  // ───────────────────────────── onboarding ─────────────────────────────
+
+  function greeting() {
+    const h = new Date().getHours();
+    return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+  }
+
+  function chosenAddress() {
+    const b = dom.obAddress.querySelector('[aria-checked="true"]');
+    return b ? b.dataset.value : "sir";
+  }
+
+  function openOnboarding(at) {
+    const s = app.setup;
+    if (!s) return;
+    if (!app.ob.open) {
+      app.ob.open = true;
+      dom.app.setAttribute("inert", "");
+      dom.onboard.hidden = false;
+      setText(dom.obGreet, `${greeting()}.`);
+      const v = s.settings || {};
+      fillSegments(dom.obAddress, addressPairs(["sir", "ma'am", "boss"]), String(v["persona.address"] || "sir"));
+      fillSegments(dom.obUnits, [["metric", "Metric"], ["imperial", "Imperial"]], String(v["location.units"] || "metric"));
+      dom.obName.value = String(v["persona.name"] || "");
+      dom.obCity.value = String(v["location.city"] || "");
+      startWakeDownload();
+    }
+    goStep(ONBOARD_STEPS.includes(at) ? at : "key");
+  }
+
+  function closeOnboarding() {
+    if (!app.ob.open) return;
+    app.ob.open = false;
+    dom.onboard.hidden = true;
+    dom.obKey.value = "";
+    dom.app.removeAttribute("inert");
+    writeStore("sessionStorage", ONBOARD_KEY, "1");
+  }
+
+  function goStep(step) {
+    app.ob.step = step;
+    const at = ONBOARD_STEPS.indexOf(step);
+    for (const section of dom.onboard.querySelectorAll(".onboard-step")) {
+      show(section, section.dataset.step === step);
+    }
+    for (const li of dom.obSteps.children) {
+      const i = ONBOARD_STEPS.indexOf(li.dataset.step);
+      setAttr(li, "data-state", i < at ? "done" : i === at ? "current" : "todo");
+      if (i === at) li.setAttribute("aria-current", "step");
+      else li.removeAttribute("aria-current");
+    }
+    // The greeting belongs to the first step; after that, the question is the page.
+    show(dom.obGreet, at === 0);
+    show(dom.obIntro, at === 0);
+    dom.obBack.disabled = at === 0;
+    renderOnboarding();
+    const first = dom.onboard.querySelector(
+      `.onboard-step[data-step="${step}"] input, .onboard-step[data-step="${step}"] [aria-checked="true"]`,
+    );
+    (first || dom.obNext).focus();
+  }
+
+  function renderOnboarding() {
+    const s = app.setup;
+    if (!s) return;
+    const hasKey = !!(s.secrets && s.secrets.gemini_api_key);
+    setText(
+      dom.obKeyState,
+      hasKey ? "A key is stored. Paste another only to replace it." : "",
+    );
+    setAttr(dom.obKeyState, "data-tone", hasKey ? "ok" : "");
+    const step = app.ob.step;
+    let next = "Continue";
+    if (step === "key" && !hasKey && !dom.obKey.value.trim()) next = "Skip for now";
+    if (step === "done") next = app.inApp ? "Start listening" : "Finish";
+    setText(dom.obNext, next);
+    if (step === "mic") renderObMics(s);
+    if (step === "done") renderObDone(s);
+    renderObWake();
+  }
+
+  function renderObMics(s) {
+    const devices = Array.isArray(s.devices) ? s.devices : [];
+    const current = String((s.settings || {})["voice.input_device"] || "");
+    const items = [{ value: "", label: "System default", hint: "Whatever Windows is set to use" }].concat(
+      devices.map((d) => ({ value: d.label, label: d.label, hint: "Listens and speaks" })),
+    );
+    syncList(
+      dom.obMics,
+      items,
+      (x) => `m:${x.value}`,
+      (x) => {
+        const b = el("button", "choice");
+        b.type = "button";
+        b.setAttribute("role", "radio");
+        b.dataset.value = x.value;
+        b.append(el("span", "choice-dot"), el("span", "choice-label"), el("span", "choice-hint"));
+        return b;
+      },
+      (b, x) => {
+        setText(b.children[1], x.label);
+        setText(b.children[2], x.hint);
+        setAttr(b, "aria-checked", x.value === current);
+      },
+    );
+    setText(
+      dom.obMicWhy,
+      s.devices_why
+        ? appText(s.devices_why, "")
+        : devices.length
+          ? ""
+          : "I can't see a microphone that can also play sound. The system default will do for now.",
+    );
+  }
+
+  function renderObDone(s) {
+    const v = s.settings || {};
+    const address = String(v["persona.address"] || "sir");
+    setText(dom.obDoneH, `Very good, ${address}.`);
+    const phrase = s.wake && s.wake.word ? wakeLabel(s.wake.word) : "";
+    let say = phrase
+      ? `I'll be listening for ${phrase}. Say it whenever you need me.`
+      : "I'll be listening all the time; just speak.";
+    if (app.inApp) say = `I'm starting the desk now. ${say}`;
+    else say = `That's everything saved. Restart the desk to use it.`;
+    setText(dom.obDoneSay, say);
+    const mic = String(v["voice.input_device"] || "");
+    const city = String(v["location.city"] || "");
+    const lines = [
+      ["Gemini key", s.secrets && s.secrets.gemini_api_key ? "stored in the keyring" : "not yet — add it in Settings"],
+      ["Microphone", mic || "the system default"],
+      ["Place", city || "worked out from your connection"],
+      ["Wake word", !s.wake || !s.wake.word ? "none — always listening" : s.wake.ready || app.ob.wake === "ready" ? "ready" : "still fetching"],
+    ];
+    syncList(
+      dom.obSummary,
+      lines,
+      (x) => x[0],
+      () => {
+        const li = el("li");
+        li.append(el("span", "sum-k"), el("span", "sum-v"));
+        return li;
+      },
+      (li, x) => {
+        setText(li.children[0], x[0]);
+        setText(li.children[1], x[1]);
+      },
+    );
+  }
+
+  // The wake model is fetched while the questions are answered, so "Ready"
+  // rarely waits for it. Its licence is shown beside it, every time.
+  async function startWakeDownload() {
+    const w = app.setup && app.setup.wake;
+    if (!w || !w.word) app.ob.wake = "none";
+    else if (w.ready) app.ob.wake = "ready";
+    if (app.ob.wake === "none" || app.ob.wake === "ready" || app.ob.wake === "fetching") {
+      renderObWake();
+      return;
+    }
+    app.ob.wake = "fetching";
+    renderObWake();
+    try {
+      const data = await api(API.setupWake, { restart: false });
+      app.ob.wake = "ready";
+      app.ob.wakeMsg = data.message || "";
+    } catch (err) {
+      app.ob.wake = "failed";
+      app.ob.wakeMsg = appText(err && err.message, "I couldn't fetch it.");
+    }
+    renderObWake();
+    if (app.ob.open && app.ob.step === "done" && app.setup) renderObDone(app.setup);
+  }
+
+  function renderObWake() {
+    const w = (app.setup && app.setup.wake) || {};
+    const state = app.ob.wake;
+    const said = app.ob.step === "done" && state === "ready";
+    show(dom.obWake, state !== "none" && state !== "idle" && !said);
+    const words = {
+      fetching: ["fetching", "live", `Fetching the model that lets me hear ${wakeLabel(w.word || "hey_jarvis")}…`],
+      ready: ["ready", "done", `The wake-word model is in place.`],
+      failed: ["failed", "warn", app.ob.wakeMsg || "I couldn't fetch the wake-word model."],
+    }[state] || ["—", "done", ""];
+    setText(dom.obWakePill, words[0]);
+    setAttr(dom.obWakePill, "data-tone", words[1]);
+    setAttr(dom.obWakePill, "data-busy", state === "fetching");
+    setText(dom.obWakeText, words[2]);
+    show(dom.obWakeRetry, state === "failed");
+    setText(dom.obWakeLicence, w.licence || "");
+  }
+
+  async function obNext() {
+    const step = app.ob.step;
+    const go = (to) => goStep(to);
+    try {
+      if (step === "key") {
+        if (dom.obKey.value.trim()) {
+          const ok = await storeSecret("gemini_api_key", dom.obKey, dom.obNext, { restart: false });
+          if (!ok) return;
+        }
+        go("mic");
+      } else if (step === "mic") {
+        go("name");
+      } else if (step === "name") {
+        await withBusy(dom.obNext, async () => {
+          await saveSetting("persona.address", chosenAddress(), { restart: false, quiet: true });
+          await saveSetting("persona.name", dom.obName.value.trim(), { restart: false, quiet: true });
+        });
+        await loadSetup();
+        go("city");
+      } else if (step === "city") {
+        const units = dom.obUnits.querySelector('[aria-checked="true"]');
+        await withBusy(dom.obNext, async () => {
+          await saveSetting("location.city", dom.obCity.value.trim(), { restart: false, quiet: true });
+          await saveSetting("location.units", units ? units.dataset.value : "metric", { restart: false, quiet: true });
+        });
+        await loadSetup();
+        go("done");
+      } else if (step === "done") {
+        await finishOnboarding();
+      }
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401)) {
+        toast(appText(err.message, "That was not saved."), { tone: "bad", head: "Setup" });
+      }
+    }
+  }
+
+  async function finishOnboarding() {
+    if (app.inApp) {
+      const data = await withBusy(dom.obNext, () => api(API.appRestart, { process: "desk" }));
+      if (!data) return;
+      toast(`At your service, ${chosenAddress()}.`, { head: "Jarvis" });
+    } else {
+      toast("Saved. Restart the desk to use it.", { head: "Setup" });
+    }
+    closeOnboarding();
+    await loadApp();
+    scheduleAppRefresh();
+  }
+
+  function obBack() {
+    const at = ONBOARD_STEPS.indexOf(app.ob.step);
+    if (at > 0) goStep(ONBOARD_STEPS[at - 1]);
+  }
+
+  async function onObMicClick(e) {
+    const b = e.target.closest(".choice");
+    if (!b) return;
+    for (const x of dom.obMics.children) setAttr(x, "aria-checked", x === b);
+    try {
+      await saveSetting("voice.input_device", b.dataset.value, { restart: false, quiet: true });
+      await loadSetup();
+    } catch (err) {
+      if (!(err instanceof ApiError && err.status === 401)) {
+        toast(appText(err.message, "That was not saved."), { tone: "bad", head: "Microphone" });
+      }
+    }
+  }
+
+  function onSegmentClick(e) {
+    const b = e.target.closest(".seg");
+    if (!b) return;
+    for (const x of b.parentElement.children) setAttr(x, "aria-checked", x === b);
+  }
+
+  // ───────────────────────────── goodbye ─────────────────────────────
+
+  // The page outlives the server it came from. After Quit it says so, and
+  // stops trying to reconnect to something that was asked to go away.
+  function farewell() {
+    app.locked = true;
+    closeStream();
+    clearTimeout(app.reconnectTimer);
+    clearTimeout(app.refreshTimer);
+    clearTimeout(app.appTimer);
+    setLink("off");
+    closeOnboarding();
+    dom.app.setAttribute("inert", "");
+    dom.farewell.hidden = false;
+  }
+
   // ───────────────────────────── wiring ─────────────────────────────
 
   function cacheDom() {
@@ -1451,6 +2463,8 @@
     dom.orbState = byId("orb-state");
     dom.orbNote = byId("orb-note");
     dom.attention = byId("attention");
+    dom.orbAction = byId("orb-action");
+    dom.problems = byId("problems");
     dom.roDesk = byId("ro-desk");
     dom.roPresence = byId("ro-presence");
     dom.roWake = byId("ro-wake");
@@ -1477,6 +2491,7 @@
       questions: byId("tab-questions"),
       builds: byId("tab-builds"),
       hearing: byId("tab-hearing"),
+      settings: byId("tab-settings"),
     };
     dom.panels = {
       tools: byId("panel-tools"),
@@ -1485,6 +2500,7 @@
       questions: byId("panel-questions"),
       builds: byId("panel-builds"),
       hearing: byId("panel-hearing"),
+      settings: byId("panel-settings"),
     };
     dom.counts = {
       tools: byId("count-tools"),
@@ -1506,6 +2522,7 @@
     dom.toolsEmpty = byId("tools-empty");
 
     dom.scheduleWarn = byId("schedule-warn");
+    dom.scheduleRestart = byId("schedule-restart");
     dom.remindForm = byId("remind-form");
     dom.reminderList = byId("reminder-list");
     dom.remindersEmpty = byId("reminders-empty");
@@ -1526,6 +2543,64 @@
     dom.palette = byId("palette");
     dom.paletteInput = byId("palette-input");
     dom.paletteList = byId("palette-list");
+
+    dom.settingsOff = byId("settings-off");
+    dom.settingsBody = byId("settings-body");
+    dom.setGeminiVoice = byId("set-gemini-voice");
+    dom.previewVoice = byId("preview-voice");
+    dom.setReaderVoice = byId("set-reader-voice");
+    dom.setMic = byId("set-mic");
+    dom.setMicHint = byId("set-mic-hint");
+    dom.setWakeWord = byId("set-wake-word");
+    dom.wakePill = byId("wake-pill");
+    dom.wakeDownload = byId("wake-download");
+    dom.wakeLicence = byId("wake-licence");
+    dom.setWakeThreshold = byId("set-wake-threshold");
+    dom.setWakeOut = byId("set-wake-out");
+    dom.setAddress = byId("set-address");
+    dom.setAddressOther = byId("set-address-other");
+    dom.setName = byId("set-name");
+    dom.setCity = byId("set-city");
+    dom.setUnits = byId("set-units");
+    dom.setTz = byId("set-tz");
+    dom.tzList = byId("tz-list");
+    dom.setVocab = byId("set-vocab");
+    dom.setLangs = byId("set-langs");
+    dom.secretList = byId("secret-list");
+    dom.claudeSignin = byId("claude-signin");
+    dom.setAutostart = byId("set-autostart");
+    dom.setTelegram = byId("set-telegram");
+    dom.setOpenWindow = byId("set-open-window");
+    dom.setProcesses = byId("set-processes");
+    dom.procList = byId("proc-list");
+    dom.rerunSetup = byId("rerun-setup");
+    dom.quit = byId("quit");
+    dom.farewell = byId("farewell");
+
+    dom.onboard = byId("onboard");
+    dom.obSteps = byId("onboard-steps");
+    dom.obGreet = byId("onboard-greet");
+    dom.obIntro = byId("onboard-intro");
+    dom.obKeyForm = byId("ob-key-form");
+    dom.obKey = byId("ob-key");
+    dom.obKeyState = byId("ob-key-state");
+    dom.obMics = byId("ob-mics");
+    dom.obMicWhy = byId("ob-mic-why");
+    dom.obAddress = byId("ob-address");
+    dom.obName = byId("ob-name");
+    dom.obCity = byId("ob-city");
+    dom.obUnits = byId("ob-units");
+    dom.obDoneH = byId("ob-h-done");
+    dom.obDoneSay = byId("ob-done-say");
+    dom.obSummary = byId("ob-summary");
+    dom.obWake = byId("ob-wake");
+    dom.obWakePill = byId("ob-wake-pill");
+    dom.obWakeText = byId("ob-wake-text");
+    dom.obWakeRetry = byId("ob-wake-retry");
+    dom.obWakeLicence = byId("ob-wake-licence");
+    dom.obLater = byId("ob-later");
+    dom.obBack = byId("ob-back");
+    dom.obNext = byId("ob-next");
   }
 
   // A fixed form that calls one tool with whatever its named inputs hold.
@@ -1559,7 +2634,8 @@
     });
 
     dom.composer.addEventListener("submit", submitChat);
-    dom.speakReplies.checked = readStore("localStorage", SPEAK_KEY) === "1";
+    // On unless the user turned it off: an assistant with a voice should use it.
+    dom.speakReplies.checked = readStore("localStorage", SPEAK_KEY) !== "0";
     dom.speakReplies.addEventListener("change", () =>
       writeStore("localStorage", SPEAK_KEY, dom.speakReplies.checked ? "1" : "0"),
     );
@@ -1623,6 +2699,59 @@
     });
 
     armStop();
+    armQuit();
+
+    dom.orbAction.addEventListener("click", () => {
+      if (app.orbAction) app.orbAction(dom.orbAction);
+    });
+    dom.problems.addEventListener("click", (e) => {
+      const b = e.target.closest(".problem-fix");
+      if (b) runFix(b.dataset.action, b);
+    });
+    dom.scheduleRestart.addEventListener("click", () => restartProcess("schedule", dom.scheduleRestart));
+
+    dom.settingsBody.addEventListener("change", (e) => {
+      if (e.target.dataset && e.target.dataset.key) saveField(e.target);
+    });
+    dom.setWakeThreshold.addEventListener("input", () =>
+      setText(dom.setWakeOut, Number(dom.setWakeThreshold.value).toFixed(2)),
+    );
+    dom.setAddress.addEventListener("click", onAddressClick);
+    dom.previewVoice.addEventListener("click", previewVoice);
+    dom.wakeDownload.addEventListener("click", () => downloadWake(dom.wakeDownload));
+    dom.claudeSignin.addEventListener("click", signInClaude);
+    dom.secretList.addEventListener("click", onSecretClick);
+    dom.secretList.addEventListener("submit", onSecretSubmit);
+    dom.procList.addEventListener("click", (e) => {
+      const b = e.target.closest(".proc-restart");
+      if (b) restartProcess(b.closest(".proc").dataset.key, b);
+    });
+    dom.rerunSetup.addEventListener("click", () => openOnboarding("key"));
+
+    dom.obKeyForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      obNext();
+    });
+    dom.obKey.addEventListener("input", renderOnboarding);
+    dom.obNext.addEventListener("click", obNext);
+    dom.obBack.addEventListener("click", obBack);
+    dom.obLater.addEventListener("click", closeOnboarding);
+    dom.obMics.addEventListener("click", onObMicClick);
+    dom.obAddress.addEventListener("click", onSegmentClick);
+    dom.obUnits.addEventListener("click", onSegmentClick);
+    dom.obWakeRetry.addEventListener("click", () => {
+      app.ob.wake = "idle";
+      startWakeDownload();
+    });
+    dom.onboard.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeOnboarding();
+      } else if (e.key === "Enter" && e.target.tagName === "INPUT" && e.target !== dom.obKey) {
+        e.preventDefault();
+        obNext();
+      }
+    });
 
     const remembered = readStore("localStorage", TAB_KEY);
     selectTab(TABS.includes(remembered) ? remembered : "tools", false);
@@ -1648,7 +2777,13 @@
       toast(err.message, { tone: "bad", head: "Connection" });
       setLink("retry");
       scheduleReconnect();
+      return;
     }
+    await loadApp();
+    const setup = await loadSetup();
+    // First run: no key and nothing saved yet. Once dismissed, not again in
+    // this tab; Settings has the way back in.
+    if (setup && setup.first_run && readStore("sessionStorage", ONBOARD_KEY) !== "1") openOnboarding("key");
   }
 
   boot();

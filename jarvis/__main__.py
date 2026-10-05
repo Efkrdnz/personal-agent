@@ -10,6 +10,7 @@ the data behind it.
 
 The commands, in the order somebody new to the machine needs them:
 
+    python -m jarvis                the app: the window, the desk and the rest, no terminal
     python -m jarvis doctor         what is missing, and the command that fixes it
     python -m jarvis secrets set X  put a credential in the OS keyring
     python -m jarvis config init    write a config file with the defaults in it
@@ -28,6 +29,10 @@ The commands, in the order somebody new to the machine needs them:
     python -m jarvis remind         the reminders the scheduler will say
     python -m jarvis hearing list   the words Jarvis corrects when it mishears you
     python -m jarvis wake download  fetch the "hey Jarvis" model; `wake test` to measure
+    python -m jarvis app --selftest check a built app from inside it, as JSON
+
+With no command at all it runs ``app``, which is what double-clicking Jarvis.exe
+does: :mod:`jarvis.app` starts the other processes and keeps them running.
 
 ``doctor`` is the important one. A voice assistant that fails at startup fails
 with no screen and no log the user will find, so the whole of "why won't it
@@ -252,7 +257,14 @@ def _check_claude_cli(r: Report) -> None:
     bundled = "bundled with the SDK" if "claude_agent_sdk" in exe else "from PATH"
     try:
         out = subprocess.run(  # noqa: S603 - a fixed argv, no shell
-            [exe, "--version"], capture_output=True, text=True, timeout=20, check=False
+            [exe, "--version"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+            # CREATE_NO_WINDOW: invisible from a terminal, and from the windowed
+            # exe, which has no console to lend, claude.exe would flash its own.
+            creationflags=0x08000000 if sys.platform == "win32" else 0,
         )
         version = (out.stdout or out.stderr).strip().splitlines()[:1]
         r.add(OK, f"{version[0] if version else '(version unknown)'}  ({bundled})")
@@ -505,6 +517,7 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
         chat_why = 'google-genai is not installed (pip install -e ".[live]")'
     verdict(not chat_why, "python -m jarvis chat", chat_why)
     r.add(OK, f"{'python -m jarvis window':<28} — the HUD; chat in it needs the same key")
+    r.add(OK, f"{'python -m jarvis app':<28} — all of it, in a window; what Jarvis.exe runs")
     build_why = "" if have.get("gemini_api_key") else "no gemini_api_key (it tidies your words)"
     r.add(
         OK if not build_why else WARN,
@@ -716,16 +729,20 @@ def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any
     from dataclasses import replace
 
     from jarvis import hearing
+    from jarvis.live import persona as manner
 
     lex = hearing.lexicon(con, extra_terms=cfg.voice.vocabulary)
     told = hearing.instruction(lex)
+    # How Jarvis addresses the user is a setting, so the two profiles that talk
+    # to the user are rebuilt with it; any other profile keeps its own words.
+    addressed = {"desk": manner.desk_instruction, "phone_user": manner.phone_instruction}
+    build = addressed.get(prof.name)
+    base = build(cfg.persona.address, cfg.persona.name) if build else prof.system_instruction
     return replace(
         prof,
         model=cfg.voice.model,
         voice=cfg.voice.gemini_voice,
-        system_instruction="\n\n".join(
-            x for x in (prof.system_instruction, told, remembered(con)) if x
-        ),
+        system_instruction="\n\n".join(x for x in (base, told, remembered(con)) if x),
         vocabulary=hearing.vocabulary(lex) if cfg.voice.asr_vocabulary else (),
         language_codes=tuple(cfg.voice.languages),
     )
@@ -1118,7 +1135,9 @@ def cmd_chat(args: argparse.Namespace) -> int:
         model=cfg.voice.text_model,
         declarations=reg.declarations("cli"),
         dispatch=lambda name, a: reg.dispatch(name, a, ctx),
-        system_instruction=persona(extra=remembered(con)),
+        system_instruction=persona(
+            extra=remembered(con), address=cfg.persona.address, name=cfg.persona.name
+        ),
     )
     speaker = None
     if args.speak:
@@ -1305,15 +1324,25 @@ def _wake_score(model: Any, pcm: bytes, rate: int) -> float:
 # ───────────────────────────── the window ─────────────────────────────
 
 
-def cmd_window(args: argparse.Namespace) -> int:
-    """The HUD: a local page in an app window, reading the rows every process writes."""
-    from jarvis.tools.default import registry
-    from jarvis.window.launch import open_window
-    from jarvis.window.server import Services, make_server
+def build_window_services(
+    cfg: cfgmod.Config,
+    db_path: str | None,
+    *,
+    control: Any | None = None,
+    setup: Any | None = None,
+    late_key: bool = False,
+) -> Any:
+    """Everything the window server can do, for ``window`` and ``app`` alike. Wiring only.
 
-    cfg = cfgmod.load(args.config)
+    ``late_key`` is the app's: its first-run screen stores the Gemini key AFTER
+    the window is up, and a chat built with the key the process started with
+    would stay off until the user found out they had to restart.
+    """
+    from jarvis.tools.default import registry
+    from jarvis.window.server import Services
+
     key = secrets.get("gemini_api_key")
-    con = db.open_db(args.db)  # migrate once, before any request needs the tables
+    con = db.open_db(db_path)  # migrate once, before any request needs the tables
     try:
         notes_paragraph = remembered(con)
     finally:
@@ -1321,21 +1350,42 @@ def cmd_window(args: argparse.Namespace) -> int:
 
     reg = registry()
     extra = tool_extra(cfg, key)
-    chat, chat_why = _window_chat(cfg, key, args.db, reg, extra, notes_paragraph)
-    services = Services(
-        open_db=lambda: db.connect(args.db),
+    redactor = desk_redactor()
+    chat, chat_why = _window_chat(cfg, key, db_path, reg, extra, notes_paragraph)
+    if chat is None and late_key and _installed("google.genai"):
+        chat, chat_why = _late_chat(cfg, db_path, reg, extra, notes_paragraph), ""
+    return Services(
+        open_db=lambda: db.connect(db_path),
         registry=reg,
         extra=extra,
         chat=chat,
         chat_why=chat_why,
-        speak=_window_speaker(cfg, args.db),
+        speak=_window_speaker(cfg, db_path, redactor=redactor),
         wake_word=_wake_phrase(cfg),
         wake_threshold=cfg.voice.wake_threshold,
         spend_threshold_usd=cfg.spend_threshold_usd,
         tz=cfg.tz,
-        redactor=desk_redactor(),
+        redactor=redactor,
+        setup=setup,
+        control=control,
     )
-    server = make_server(services, port=args.port)
+
+
+def cmd_window(args: argparse.Namespace) -> int:
+    """The HUD: a local page in an app window, reading the rows every process writes."""
+    from jarvis.window.launch import open_window
+    from jarvis.window.server import make_server
+
+    services = build_window_services(cfgmod.load(args.config), args.db)
+    try:
+        server = make_server(services, port=args.port)
+    except OSError as exc:
+        print(
+            f"jarvis window: port {args.port} is not free ({exc.strerror or exc}); "
+            "leave out --port to take any free one",
+            file=sys.stderr,
+        )
+        return 1
     # The token is printed only when the user must paste it themselves: a
     # terminal gets screenshotted, and the token is the whole of the access check.
     print(f"jarvis window on http://127.0.0.1:{server.port}/  (ctrl-c to stop)")
@@ -1397,7 +1447,9 @@ def _window_chat(
         model=cfg.voice.text_model,
         declarations=reg.declarations("cli"),
         dispatch=dispatch,
-        system_instruction=persona(extra=notes_paragraph),
+        system_instruction=persona(
+            extra=notes_paragraph, address=cfg.persona.address, name=cfg.persona.name
+        ),
     )
 
     def send(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
@@ -1410,7 +1462,31 @@ def _window_chat(
     return send, ""
 
 
-def _window_speaker(cfg: cfgmod.Config, db_path: str | None) -> Any:
+def _late_chat(
+    cfg: cfgmod.Config,
+    db_path: str | None,
+    reg: Any,
+    extra: dict[str, Any],
+    notes_paragraph: str,
+) -> Any:
+    """The window's chat, built on the first message sent after a key exists."""
+    built: dict[str, Any] = {}
+
+    def send(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        # The server serialises chat calls, so building once here cannot race.
+        if "chat" not in built:
+            chat, _ = _window_chat(
+                cfg, secrets.get("gemini_api_key"), db_path, reg, extra, notes_paragraph
+            )
+            if chat is None:
+                raise RuntimeError("I need the Gemini key before I can chat; it goes in Settings.")
+            built["chat"] = chat
+        return built["chat"](text)
+
+    return send
+
+
+def _window_speaker(cfg: cfgmod.Config, db_path: str | None, *, redactor: Any = None) -> Any:
     """``speak(text) -> "desk" | "local"`` for the window. Wiring only.
 
     Through the desk when it is running — it owns the speaker, and a second
@@ -1431,14 +1507,19 @@ def _window_speaker(cfg: cfgmod.Config, db_path: str | None) -> Any:
         try:
             beat = liveness.read(con, "desk")
             if beat is not None and beat.state != liveness.OFFLINE:
+                # A row outlives the sentence, so a secret is kept out of it
+                # the way the event log keeps one out.
+                said = redactor.apply(text)[0] if redactor is not None else text
                 kill.issue_command(
                     con,
                     verb="say",
                     target_kind="channel",
                     target_id="desk",
-                    args={"text": text},
+                    args={"text": said},
                     issued_by="window",
-                    ttl_s=30,
+                    # The default, not a few seconds: a desk mid-reply reads
+                    # its commands only after it stops talking.
+                    ttl_s=kill.DEFAULT_TTL_S,
                 )
                 return "desk"
         finally:
@@ -1652,7 +1733,17 @@ def cmd_build(args: argparse.Namespace) -> int:
 
 
 class StartupRefused(RuntimeError):
-    """The desk cannot start, and the message says what to run."""
+    """The desk cannot start, and the message says what to run.
+
+    ``action`` is what the HUD's button for it does — ``"secret:<name>"``,
+    ``"wake"``, ``"device"``, ``"voice"`` — or None when no button can fix it.
+    It travels in the ``desk.refused`` event, because in the app nobody reads
+    the message off a terminal.
+    """
+
+    def __init__(self, message: str, *, action: str | None = None) -> None:
+        super().__init__(message)
+        self.action = action
 
 
 @dataclass
@@ -1725,7 +1816,8 @@ def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any:
         raise StartupRefused(
             "no reader voice that can read a question word for word. The simplest is your "
             "system's own: `sudo apt install espeak-ng` on Linux (macOS and Windows have one "
-            'built in). Or `pip install -e ".[tts]"` for Microsoft\'s voices.'
+            'built in). Or `pip install -e ".[tts]"` for Microsoft\'s voices.',
+            action="voice",
         )
     print(f"{OK}  reader voice: {' -> '.join(e.name for e in ladder)}")
     track = mixer.track("verbatim", Prio.VERBATIM, content_rate=24_000)
@@ -1742,7 +1834,9 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     if missing:
         raise StartupRefused(
             f"missing packages: {', '.join(missing)}. Run `python -m jarvis doctor` for the "
-            'install commands, or `pip install -e ".[cc,voice,live,tts]"`.'
+            'install commands, or `pip install -e ".[cc,voice,live,tts]"`.',
+            # No button installs a package; in the app this is a broken build.
+            action=None,
         )
 
     from jarvis.audio import BLOCK, DEV_RATE, MIC_RATE
@@ -1782,7 +1876,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     try:
         selection = leg.select()
     except DeviceError as exc:
-        raise StartupRefused(str(exc)) from exc
+        raise StartupRefused(str(exc), action="device") from exc
     print(f"{OK}  microphone and speaker: {selection.describe()}")
     # The audio graph's events — wake, sleep, turns, barge-ins — and the turn
     # controller's own, into ONE queue the publisher drains. The controller had
@@ -1805,7 +1899,8 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         raise StartupRefused(
             f"{exc}\nYou have voice.assume_headset = false, which means open speakers and "
             'therefore a real echo canceller. Either `pip install -e ".[aec]"`, or set '
-            "assume_headset = true and use a headset."
+            "assume_headset = true and use a headset.",
+            action="device",
         ) from exc
     graph = AudioGraph(
         mixer=mixer,
@@ -1922,13 +2017,15 @@ def _desk_wake(
     if cfg.voice.wake_word not in PHRASES:
         raise StartupRefused(
             f"no wake model called {cfg.voice.wake_word!r}; have {', '.join(sorted(PHRASES))}. "
-            'Set voice.wake_word to one of those, or "" to listen all the time.'
+            'Set voice.wake_word to one of those, or "" to listen all the time.',
+            action="voice",
         )
     try:
         model = OnnxWakeWord(cfg.voice.wake_word)
     except ModelsMissing as exc:
         raise StartupRefused(
-            f'{exc}\nOr set voice.wake_word = "" in config.toml to listen all the time.'
+            f'{exc}\nOr set voice.wake_word = "" in config.toml to listen all the time.',
+            action="wake",
         ) from exc
     phrase = PHRASES[cfg.voice.wake_word][1]
     blip = mixer.track("chime", Prio.MONITOR, content_rate=24_000) if cfg.voice.wake_chime else None
@@ -2001,6 +2098,35 @@ def _desk_event_printer(transcript: Any) -> Any:
     return on_event
 
 
+def _refused(db_path: str | None, sentence: str, action: str | None) -> int:
+    """Say why the desk will not start where the window can read it, and exit 2.
+
+    Printing alone reached nobody once the desk became a child of the app with
+    no console. Exit 2 is what tells the supervisor not to restart a refusal.
+    """
+    from jarvis.bus import publish
+
+    print(sentence, file=sys.stderr)
+    try:
+        con = db.open_db(db_path)
+    except Exception as exc:  # noqa: BLE001 - stderr above is still in the log
+        print(f"[refused] could not record it: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+    try:
+        publish(
+            con,
+            "desk.refused",
+            "desk",
+            {"sentence": sentence, "action": action},
+            redactor=desk_redactor(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[refused] could not record it: {type(exc).__name__}: {exc}", file=sys.stderr)
+    finally:
+        con.close()
+    return 2
+
+
 def cmd_desk(args: argparse.Namespace) -> int:
     import asyncio
 
@@ -2008,9 +2134,10 @@ def cmd_desk(args: argparse.Namespace) -> int:
 
     try:
         desk = _build_desk(args)
-    except (StartupRefused, secrets.MissingSecret) as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+    except StartupRefused as exc:
+        return _refused(args.db, str(exc), exc.action)
+    except secrets.MissingSecret as exc:
+        return _refused(args.db, str(exc), f"secret:{exc.secret.name}")
     leg, graph, session, questions = desk.leg, desk.graph, desk.session, desk.questions
 
     async def watch_for_questions() -> None:
@@ -2089,14 +2216,155 @@ def cmd_desk(args: argparse.Namespace) -> int:
                 # final beat says "offline" so the window does not wait.
                 desk.publisher.stop()
 
+    from jarvis.audio.devices import DeviceError
+
     try:
         asyncio.run(run())
     except KeyboardInterrupt:
         print("\nstopped.")
     except LiveUnavailable as exc:
-        print(str(exc), file=sys.stderr)
-        return 2
+        return _refused(args.db, str(exc), None)
+    except DeviceError as exc:
+        # Opening the stream is the last step of starting, so a device that
+        # will not open is a refusal like any other: held, not crash-looped.
+        return _refused(args.db, str(exc), "device")
     return 0
+
+
+# ───────────────────────────── the app ─────────────────────────────
+
+
+def cmd_app(args: argparse.Namespace) -> int:
+    """The double-clickable app: the window, the desk, the scheduler and the bot. Wiring only.
+
+    Every decision is in :mod:`jarvis.app` — what a second copy does
+    (``instance``), what an exit means (``supervisor``), what the tray offers
+    (``tray``). This binds them to real callables, in the order that matters:
+    the lock before anything, the server before its address is published, the
+    children after the window can show their failures.
+    """
+    from jarvis.app import instance, selftest
+    from jarvis.window.launch import open_window
+
+    if args.selftest:
+        return selftest.main(report=args.report)
+    lock = instance.acquire()
+    if lock is None:
+        print(instance.hand_off(open_window))
+        return 0
+    try:
+        return _run_app(args)
+    finally:
+        lock.release()
+
+
+def _run_app(args: argparse.Namespace) -> int:
+    import threading
+
+    from jarvis import __version__
+    from jarvis.app import autostart, instance, tray
+    from jarvis.app import supervisor as sup
+    from jarvis.bus import publish
+    from jarvis.window.launch import open_window
+    from jarvis.window.server import make_server
+
+    try:
+        cfg = cfgmod.load(args.config)
+    except (ValueError, OSError) as exc:
+        # The window is where a broken config.toml gets explained (its settings
+        # screen reads the file itself and says what is wrong), so the app must
+        # still get as far as opening it.
+        print(f"[config] {exc}; starting with the defaults", file=sys.stderr)
+        cfg = cfgmod.Config()
+    con = db.open_db(args.db)  # migrated before any child or request needs a table
+    try:
+        publish(con, "app.started", "app", {"version": __version__})
+    finally:
+        con.close()
+
+    # Children find the same database and config through the environment, the
+    # way every process here already looks for them.
+    env = dict(os.environ)
+    if args.db:
+        env["JARVIS_DB"] = str(Path(args.db).expanduser().resolve())
+    if args.config:
+        env["JARVIS_CONFIG"] = str(Path(args.config).expanduser().resolve())
+    quit_event = threading.Event()
+    supervisor = sup.Supervisor(
+        sup.app_specs(),
+        env=env,
+        on_exit=sup.exit_recorder(lambda: db.connect(args.db), redactor=desk_redactor()),
+    )
+    control = sup.Control(supervisor, quit_event)
+    services = build_window_services(
+        cfg,
+        args.db,
+        control=control,
+        setup=_setup_service(cfg, args, supervisor, control),
+        late_key=True,
+    )
+    server = instance.bind_remembered(lambda port: make_server(services, port=port))
+    server.start()
+    poller = threading.Thread(
+        target=sup.poll_forever, args=(supervisor, quit_event), name="supervisor", daemon=True
+    )
+    try:
+        instance.publish(server.port, server.token)
+        try:
+            autostart.sync(cfg.app.start_with_windows)
+        except Exception as exc:  # noqa: BLE001 - a registry hiccup must not stop the app
+            print(f"[autostart] {type(exc).__name__}: {exc}", file=sys.stderr)
+        boot = sup.boot_names(
+            telegram_token=bool(secrets.get("telegram_bot_token")),
+            start_telegram=cfg.app.start_telegram,
+        )
+        for name in boot:
+            supervisor.start(name)
+        poller.start()
+        print(f"jarvis {__version__} on http://127.0.0.1:{server.port}/ running {', '.join(boot)}")
+        if not args.no_window and cfg.app.open_window_on_start:
+            open_window(server.url)
+        tray.run(
+            open_window=lambda: open_window(server.url),
+            restart_voice=lambda: supervisor.restart("desk"),
+            quit=quit_event.set,
+            stop=quit_event,
+        )
+    except KeyboardInterrupt:
+        pass
+    finally:
+        quit_event.set()
+        if poller.is_alive():
+            poller.join(timeout=5)
+        supervisor.stop()
+        server.shutdown()
+    return 0
+
+
+def _setup_service(
+    cfg: cfgmod.Config, args: argparse.Namespace, supervisor: Any, control: Any
+) -> Any:
+    """The settings screen's SetupService, with the real machine behind it. Wiring only."""
+    from jarvis.app import adapters
+    from jarvis.app.setup import SetupService
+
+    preview = None
+    if _installed("google.genai"):
+        preview = adapters.gemini_preview(
+            key=lambda: secrets.get("gemini_api_key"), model=cfg.voice.tts_model, play=_play
+        )
+    return SetupService(
+        config_path=args.config,
+        db_path=args.db,
+        list_devices=adapters.list_devices,
+        wake_ready=_wake_ready,
+        download_wake=adapters.download_wake,
+        preview_voice=preview,
+        restart=supervisor.restart,
+        autostart=adapters.autostart_switch(),
+        claude_login=lambda: adapters.claude_login(claude_cli_path()),
+        control=control,
+    )
 
 
 # ───────────────────────────── the parser ─────────────────────────────
@@ -2206,7 +2474,30 @@ def build_parser() -> argparse.ArgumentParser:
     h.set_defaults(fn=cmd_hearing)
 
     sub.add_parser("desk", help="listen, talk, and drive Claude Code").set_defaults(fn=cmd_desk)
+
+    ap = sub.add_parser("app", help="the app: the window, the desk and the rest (the default)")
+    ap.add_argument("--no-window", action="store_true", help="start without opening the window")
+    ap.add_argument("--selftest", action="store_true", help="check this install, write JSON, exit")
+    ap.add_argument("--report", default=None, help="--selftest: also write the report here")
+    ap.set_defaults(fn=cmd_app)
     return p
+
+
+def _with_default_command(argv: list[str]) -> list[str]:
+    """``argv``, with ``app`` appended when it names no command at all.
+
+    The parser itself still requires a command, so ``--help`` and a typo say
+    what the commands are; only an EMPTY command line — a double-click, or
+    ``python -m jarvis --db x`` — means the app.
+    """
+    pre = argparse.ArgumentParser(add_help=False, exit_on_error=False)
+    pre.add_argument("--db")
+    pre.add_argument("--config")
+    try:
+        _, rest = pre.parse_known_args(argv)
+    except argparse.ArgumentError:
+        return argv  # e.g. `--db` with no path: the real parser says so properly
+    return argv if rest else [*argv, "app"]
 
 
 def _tolerant_output() -> None:
@@ -2225,7 +2516,9 @@ def _tolerant_output() -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     _tolerant_output()
-    args = build_parser().parse_args(argv)
+    args = build_parser().parse_args(
+        _with_default_command(list(sys.argv[1:] if argv is None else argv))
+    )
     if args.command == "secrets" and args.action in ("set", "forget") and not args.name:
         print("which secret? " + ", ".join(s.name for s in secrets.SECRETS), file=sys.stderr)
         return 1

@@ -14,7 +14,9 @@ from __future__ import annotations
 import ast
 import http.client
 import json
+import socket
 import sqlite3
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -654,6 +656,42 @@ def test_successful_requests_are_not_logged(
     assert capsys.readouterr().err == ""
 
 
+def _raw_request(srv: WindowServer, line: bytes) -> None:
+    # http.client refuses control characters in a path; a hostile page does not.
+    with socket.create_connection(("127.0.0.1", srv.port), timeout=5) as sock:
+        sock.sendall(line + b"\r\nHost: evil.example\r\n\r\n")
+        while sock.recv(4096):
+            pass
+
+
+def test_a_request_line_cannot_write_control_characters_to_the_terminal(
+    shared: WindowServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # ESC ] 0 ; ... BEL retitles a terminal; a bare CR overwrites the line.
+    _raw_request(shared, b"GET /\x1b]0;pwned\x07/\rfake HTTP/1.0")
+    err = capsys.readouterr().err
+    assert "\\x1b]0;pwned\\x07" in err and "\\x0d" in err
+    assert not any(ch in err for ch in "\x1b\x07\r")
+
+
+def test_escaping_happens_before_the_token_is_redacted(
+    shared: WindowServer, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A control character between "?t=" and the token must not split it into
+    # a part the redaction misses.
+    _raw_request(shared, f"GET /api/stream?x=\x01&t={TOKEN} HTTP/1.0".encode())
+    err = capsys.readouterr().err
+    assert TOKEN not in err and "[redacted]" in err
+
+
+def test_no_stderr_is_no_crash(shared: WindowServer, monkeypatch: pytest.MonkeyPatch) -> None:
+    # A windowed exe starts with sys.stderr = None; a refused request must
+    # still get its answer rather than kill the handler thread.
+    monkeypatch.setattr(sys, "stderr", None)
+    r = call(shared, "GET", "/api/state", headers={"Host": "evil.example"})
+    assert r.status == 403
+
+
 # ───────────────────────────── routes ─────────────────────────────
 
 
@@ -1101,3 +1139,472 @@ def test_every_spine_function_the_server_calls_exists() -> None:
     assert ("snapshot", "changed_since") in used
     missing = sorted(f"{m}.{a}" for m, a in used if not hasattr(modules[m], a))
     assert missing == []
+
+
+# ───────────────────────────── the app: setup and processes ─────────────────────────────
+
+SECRET = "AIzaSyD-SERVER-TEST-VALUE-0123456789abcdef"
+
+APP_ROUTES = (
+    ("GET", "/api/setup"),
+    ("POST", "/api/setup/secret"),
+    ("POST", "/api/setup/setting"),
+    ("POST", "/api/setup/wake"),
+    ("POST", "/api/setup/preview"),
+    ("POST", "/api/setup/claude"),
+    ("GET", "/api/app"),
+    ("POST", "/api/app/restart"),
+    ("POST", "/api/app/quit"),
+)
+
+
+class _Keyring:
+    """The jarvis.secrets surface SetupService uses, holding values in a dict."""
+
+    def __init__(self) -> None:
+        self.stored: dict[str, str] = {}
+        self.fail: BaseException | None = None
+
+    def get(self, name: str) -> str | None:
+        return self.stored.get(name)
+
+    def store(self, name: str, value: str) -> None:
+        if self.fail is not None:
+            raise self.fail
+        self.stored[name] = value
+
+    def keyring_available(self) -> tuple[bool, str]:
+        return True, "keyring backend: Fake"
+
+
+class _Control:
+    """The app's control: the supervisor's status, a restart, a quit."""
+
+    def __init__(self) -> None:
+        self.restarts: list[str] = []
+        self.quit_called = threading.Event()
+        self.procs: dict[str, dict[str, Any]] = {
+            "desk": {
+                "running": True,
+                "pid": 4242,
+                "restarts": 1,
+                "last_exit": None,
+                "held": False,
+                "reason": "",
+                "log": "/logs/desk.log",
+            },
+            "telegram": {
+                "running": False,
+                "pid": None,
+                "restarts": 0,
+                "last_exit": 2,
+                "held": True,
+                "reason": (
+                    "telegram_bot_token is not set.\n  store it : python -m jarvis secrets set x"
+                ),
+                "log": "/logs/telegram.log",
+            },
+        }
+
+    def status(self) -> dict[str, dict[str, Any]]:
+        return json.loads(json.dumps(self.procs))
+
+    def restart(self, name: str) -> None:
+        if name not in self.procs:
+            raise ValueError(f"There is no process called {name!r} to restart.")
+        self.restarts.append(name)
+
+    def quit(self) -> None:
+        self.quit_called.set()
+
+
+@dataclass
+class AppParts:
+    setup: Any
+    control: _Control
+    keyring: _Keyring
+    config: Path
+    calls: dict[str, list[Any]]
+
+
+@pytest.fixture
+def parts(tmp_path: Path, dbpath: Path) -> AppParts:
+    from jarvis.app.setup import SetupService
+
+    calls: dict[str, list[Any]] = {
+        "restart": [],
+        "download": [],
+        "preview": [],
+        "login": [],
+        "autostart": [],
+    }
+    keyring = _Keyring()
+    control = _Control()
+    config = tmp_path / "cfg" / "config.toml"
+
+    def download(word: str) -> str:
+        calls["download"].append(word)
+        return "Fetched the wake-word model."
+
+    def restart(name: str) -> None:
+        calls["restart"].append(name)
+
+    setup = SetupService(
+        config_path=config,
+        db_path=dbpath,
+        secrets_mod=keyring,
+        list_devices=lambda: [{"label": "Jabra Evolve2 40"}],
+        wake_ready=lambda word: False,
+        download_wake=download,
+        preview_voice=lambda voice, sentence: calls["preview"].append((voice, sentence)),
+        restart=restart,
+        autostart=lambda on: calls["autostart"].append(on),
+        claude_login=lambda: calls["login"].append(1) or "The sign-in is open in your browser.",
+        run_later=lambda fn: fn(),
+    )
+    return AppParts(setup=setup, control=control, keyring=keyring, config=config, calls=calls)
+
+
+@pytest.fixture
+def app_srv(make: ServerFactory, parts: AppParts) -> WindowServer:
+    return make(setup=parts.setup, control=parts.control)
+
+
+def test_every_app_route_needs_the_token(shared: WindowServer) -> None:
+    for method, path in APP_ROUTES:
+        r = call(shared, method, path, json_body={} if method == "POST" else None, token=None)
+        assert r.status == 401, (method, path)
+
+
+def test_app_routes_refuse_a_foreign_origin_even_with_the_token(
+    app_srv: WindowServer, parts: AppParts
+) -> None:
+    for method, path in APP_ROUTES:
+        r = call(
+            app_srv,
+            method,
+            path,
+            json_body={} if method == "POST" else None,
+            headers={"Origin": "http://evil.example"},
+        )
+        assert r.status == 403, (method, path)
+    assert parts.control.restarts == [] and not parts.control.quit_called.is_set()
+
+
+def test_app_posts_need_json(app_srv: WindowServer, parts: AppParts) -> None:
+    for method, path in APP_ROUTES:
+        if method == "POST":
+            r = call(app_srv, "POST", path, raw=b"{}", content_type="text/plain")
+            assert r.status == 415, path
+    assert parts.keyring.stored == {}
+
+
+def test_setup_and_app_are_503_outside_the_app(shared: WindowServer) -> None:
+    for method, path in APP_ROUTES:
+        r = call(shared, method, path, json_body={} if method == "POST" else None)
+        assert r.status == 503, (method, path)
+        assert r.body["ok"] is False and r.body["error"].endswith(".")
+        assert "python -m" not in r.body["error"]
+
+
+def test_state_says_whether_it_runs_in_the_app(shared: WindowServer, app_srv: WindowServer) -> None:
+    assert call(shared, "GET", "/api/state").body["app"] is False
+    assert call(app_srv, "GET", "/api/state").body["app"] is True
+
+
+def test_setup_status_carries_the_supervisors_problems(app_srv: WindowServer) -> None:
+    r = call(app_srv, "GET", "/api/setup")
+    assert r.status == 200
+    s = r.body
+    assert s["first_run"] is True
+    assert s["secrets"]["gemini_api_key"] is False
+    assert s["devices"] == [{"label": "Jabra Evolve2 40", "selected": False}]
+    assert s["problems"] == [
+        {
+            "process": "telegram",
+            "sentence": "telegram_bot_token is not set.",
+            "action": "restart:telegram",
+        }
+    ]
+    assert "python -m" not in r.raw.decode()
+
+
+def test_a_secret_is_stored_and_never_comes_back(
+    app_srv: WindowServer, parts: AppParts, dbpath: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    r = post(app_srv, "/api/setup/secret", {"name": "gemini_api_key", "value": SECRET})
+    assert r.status == 200
+    assert r.body == {"ok": True, "present": True, "restarted": ["desk"]}
+    assert parts.keyring.stored == {"gemini_api_key": SECRET}
+    assert parts.calls["restart"] == ["desk"]
+    status = call(app_srv, "GET", "/api/setup")
+    assert status.body["secrets"]["gemini_api_key"] is True
+    for reply in (r, status, call(app_srv, "GET", "/api/state"), call(app_srv, "GET", "/api/feed")):
+        assert SECRET.encode() not in reply.raw
+    c = connect(dbpath)
+    try:
+        dump = "\n".join(c.iterdump())
+    finally:
+        c.close()
+    assert SECRET not in dump, "the key reached the database"
+    assert SECRET not in capsys.readouterr().err
+
+
+def test_onboarding_stores_a_secret_without_restarting(
+    app_srv: WindowServer, parts: AppParts
+) -> None:
+    r = post(
+        app_srv, "/api/setup/secret", {"name": "gemini_api_key", "value": SECRET, "restart": False}
+    )
+    assert r.body["restarted"] == []
+    assert parts.calls["restart"] == []
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "gemini_api_key", "value": f"{SECRET} trailing"},
+        {"name": "gemini_api_key", "value": f"{SECRET}\n"},
+        {"name": "gemini_api_key", "value": SECRET + "x" * 4096},
+        {"name": "google_oauth_client", "value": SECRET},
+        {"name": "../../etc", "value": SECRET},
+        {"name": "gemini_api_key", "value": ""},
+        {"name": "gemini_api_key", "value": 7},
+        {"name": "gemini_api_key"},
+        {"value": SECRET},
+    ],
+)
+def test_a_refused_secret_is_a_400_sentence_that_never_quotes_it(
+    app_srv: WindowServer, parts: AppParts, capsys: pytest.CaptureFixture[str], body: dict
+) -> None:
+    r = post(app_srv, "/api/setup/secret", body)
+    assert r.status == 400
+    assert r.body["ok"] is False and r.body["error"]
+    assert SECRET.encode() not in r.raw
+    assert parts.keyring.stored == {}
+    assert SECRET not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        RuntimeError(f"backend refused password {SECRET!r}"),
+        TypeError(f"cannot store {SECRET}"),
+        OSError(f"locked: {SECRET}"),
+    ],
+)
+def test_a_keyring_failure_never_leaks_the_value(
+    app_srv: WindowServer,
+    parts: AppParts,
+    capsys: pytest.CaptureFixture[str],
+    failure: Exception,
+) -> None:
+    parts.keyring.fail = failure
+    r = post(app_srv, "/api/setup/secret", {"name": "gemini_api_key", "value": SECRET})
+    assert r.status == 502
+    assert SECRET.encode() not in r.raw
+    assert "keyring" in r.body["error"]
+    assert SECRET not in capsys.readouterr().err
+
+
+def test_an_unexpected_error_in_the_service_never_prints_the_value(
+    make: ServerFactory, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Leaky:
+        def set_secret(self, name: str, value: str, *, restart: bool = True) -> dict:
+            raise LookupError(f"lost {value}")
+
+    class Buggy:
+        def set_secret(self, name: str, value: str, *, restart: bool = True) -> dict:
+            raise AttributeError(f"no attribute for {value}")
+
+    for setup in (Leaky(), Buggy()):
+        ws = make(setup=setup)
+        r = post(ws, "/api/setup/secret", {"name": "gemini_api_key", "value": SECRET})
+        assert r.status == 500
+        assert r.body["error"] == "I couldn't store that key."
+        err = capsys.readouterr().err
+        assert SECRET not in err
+        assert "Traceback" not in err
+
+
+def test_a_setting_is_saved_through_the_service(app_srv: WindowServer, parts: AppParts) -> None:
+    from jarvis import config as cfgmod
+
+    r = post(app_srv, "/api/setup/setting", {"key": "persona.address", "value": "boss"})
+    assert r.status == 200
+    assert r.body["ok"] is True and r.body["restarted"] == ["desk"]
+    assert cfgmod.load(parts.config).persona.address == "boss"
+    assert call(app_srv, "GET", "/api/setup").body["settings"]["persona.address"] == "boss"
+    r = post(
+        app_srv,
+        "/api/setup/setting",
+        {"key": "voice.vocabulary", "value": ["quote", "Kadıköy"], "restart": False},
+    )
+    assert r.body["restarted"] == []
+    assert cfgmod.load(parts.config).voice.vocabulary == ("quote", "Kadıköy")
+
+
+@pytest.mark.parametrize(
+    ("body", "words"),
+    [
+        ({"key": "desk.permission_mode", "value": "dontAsk"}, "not a setting"),
+        ({"key": "app.start_telegram", "value": "false"}, "switch"),
+        ({"key": "location.units", "value": "furlongs"}, "metric or imperial"),
+        ({"key": "voice.wake_threshold", "value": 7}, "between 0 and 1"),
+        ({"key": "location.city", "value": SECRET}, "credential"),
+        ({"key": "persona.name"}, "missing"),
+        ({"value": "x"}, "Which setting"),
+        ({"key": 3, "value": "x"}, "Which setting"),
+    ],
+)
+def test_a_bad_setting_is_a_400_sentence(
+    app_srv: WindowServer, parts: AppParts, body: dict, words: str
+) -> None:
+    r = post(app_srv, "/api/setup/setting", body)
+    assert r.status == 400
+    assert r.body["ok"] is False
+    assert words.lower() in r.body["error"].lower()
+    assert SECRET not in r.body["error"]
+    assert "python -m" not in r.body["error"]
+    assert parts.calls["restart"] == []
+    assert not parts.config.with_name("app-settings.toml").exists()
+
+
+def test_the_wake_model_downloads_on_request(app_srv: WindowServer, parts: AppParts) -> None:
+    r = post(app_srv, "/api/setup/wake", {"restart": False})
+    assert r.status == 200
+    assert r.body["ok"] is True and r.body["message"] == "Fetched the wake-word model."
+    assert parts.calls["download"] == ["hey_jarvis"]
+    assert parts.calls["restart"] == []
+    assert "non-commercial" in r.body["licence"]
+
+
+def test_a_failed_download_is_a_502_sentence(make: ServerFactory, parts: AppParts) -> None:
+    def broken(word: str) -> str:
+        raise OSError("connection reset; run python -m jarvis wake download")
+
+    parts.setup._download_wake = broken
+    r = post(make(setup=parts.setup), "/api/setup/wake")
+    assert r.status == 502
+    assert "connection reset" in r.body["error"].lower()
+    assert "python -m" not in r.body["error"]
+
+
+def test_a_voice_sample_is_played(app_srv: WindowServer, parts: AppParts) -> None:
+    r = post(app_srv, "/api/setup/preview", {"voice": "Charon"})
+    assert r.status == 200 and r.body["ok"] is True
+    ((voice, sentence),) = parts.calls["preview"]
+    assert voice == "Charon" and "Charon" in sentence
+    for bad in ({"voice": "Nobody"}, {"voice": ""}, {}, {"voice": 3}):
+        assert post(app_srv, "/api/setup/preview", bad).status == 400, bad
+    assert len(parts.calls["preview"]) == 1
+
+
+def test_claude_sign_in(app_srv: WindowServer, parts: AppParts) -> None:
+    r = post(app_srv, "/api/setup/claude")
+    assert r.status == 200
+    assert r.body == {"ok": True, "message": "The sign-in is open in your browser."}
+    assert parts.calls["login"] == [1]
+
+
+def test_app_status_is_the_supervisors_with_command_free_reasons(app_srv: WindowServer) -> None:
+    r = call(app_srv, "GET", "/api/app")
+    assert r.status == 200
+    body = r.body
+    assert body["app"] is True and body["ok"] is True
+    assert body["processes"]["desk"] == {
+        "running": True,
+        "held": False,
+        "pid": 4242,
+        "restarts": 1,
+        "last_exit": None,
+        "reason": "",
+        "log": "/logs/desk.log",
+    }
+    assert body["processes"]["telegram"]["held"] is True
+    assert body["processes"]["telegram"]["reason"] == "telegram_bot_token is not set."
+    assert "python -m" not in json.dumps(body["processes"])
+
+
+def test_restart_reaches_the_control(app_srv: WindowServer, parts: AppParts) -> None:
+    r = post(app_srv, "/api/app/restart", {"process": "desk"})
+    assert r.status == 200 and r.body["message"] == "Restarting the desk."
+    assert parts.control.restarts == ["desk"]
+    bad = post(app_srv, "/api/app/restart", {"process": "nope"})
+    assert bad.status == 400 and "nope" in bad.body["error"]
+    assert post(app_srv, "/api/app/restart", {}).status == 400
+    assert parts.control.restarts == ["desk"]
+
+
+def test_quit_answers_first_then_quits(app_srv: WindowServer, parts: AppParts) -> None:
+    r = post(app_srv, "/api/app/quit")
+    assert r.status == 200 and r.body["ok"] is True
+    assert parts.control.quit_called.wait(3)
+
+
+def test_the_new_routes_are_registered_with_their_methods() -> None:
+    for method, path in APP_ROUTES:
+        assert server_mod._ROUTES[path][0] == method, path
+
+
+def test_every_setup_and_control_method_the_server_calls_exists() -> None:
+    """The callers exist, and so do the callees: a renamed method is a 500 at the first click."""
+    from jarvis.app.setup import SetupService
+
+    tree = ast.parse(Path(server_mod.__file__).read_text(encoding="utf-8"))
+    called: dict[str, set[str]] = {"setup": set(), "control": set()}
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in called
+        ):
+            called[node.value.id].add(node.attr)
+    assert called["setup"] >= {
+        "status",
+        "set_secret",
+        "set_setting",
+        "download_wake",
+        "preview",
+        "sign_in_claude",
+    }
+    assert called["control"] >= {"status", "restart", "quit"}
+    for name in called["setup"]:
+        assert callable(getattr(SetupService, name, None)), f"SetupService.{name}"
+    try:
+        from jarvis.app.supervisor import Control
+    except ImportError:  # the app layer is another builder's; its own tests cover it
+        return
+    for name in called["control"]:
+        assert callable(getattr(Control, name, None)), f"Control.{name}"
+
+
+def test_the_secret_bound_matches_the_services() -> None:
+    from jarvis.app.setup import MAX_SECRET
+
+    assert server_mod.MAX_SECRET == MAX_SECRET
+
+
+def test_feed_renders_the_apps_events_without_commands(
+    srv: WindowServer, con: sqlite3.Connection
+) -> None:
+    publish(
+        con,
+        "desk.refused",
+        "desk",
+        {
+            "sentence": "gemini_api_key is not set.\n  store it : python -m jarvis secrets set x",
+            "action": "secret:gemini_api_key",
+        },
+    )
+    publish(con, "app.process_exited", "app", {"process": "telegram", "code": 2, "reason": ""})
+    publish(con, "app.process_exited", "app", {"process": "schedule", "code": 1, "reason": "boom"})
+    publish(con, "app.started", "app", {"version": "1.0"})
+    items = call(srv, "GET", "/api/feed").body["items"]
+    assert [(i["role"], i["kind"], i["text"]) for i in items] == [
+        ("system", "desk.refused", "desk couldn't start: gemini_api_key is not set."),
+        ("system", "app.process_exited", "Telegram is waiting for you"),
+        ("system", "app.process_exited", "scheduler stopped unexpectedly (exit 1): Boom."),
+        ("system", "app.started", "Jarvis is online"),
+    ]

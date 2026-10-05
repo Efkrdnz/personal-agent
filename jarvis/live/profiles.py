@@ -32,6 +32,7 @@ from jarvis.live import (
     OUTPUT_RATE,
     pcm_mime,
 )
+from jarvis.live.persona import DEFAULT_VOICE, desk_instruction, phone_instruction
 
 if TYPE_CHECKING:  # pragma: no cover - typing only, the SDK is never imported at module scope
     from google.genai import types
@@ -122,8 +123,9 @@ class SessionProfile:
     #: The conversational voice. The reader voice lives in ``jarvis.voice`` and
     #: is deliberately a DIFFERENT one: Jarvis's own voice never utters
     #: load-bearing text, so the user learns that the other voice means
-    #: "somebody else's exact words".
-    voice: str = "Zephyr"
+    #: "somebody else's exact words". The default is Jarvis's, so a profile
+    #: built ad hoc sounds like the assistant rather than like a stranger.
+    voice: str = DEFAULT_VOICE
     system_instruction: str = ""
     language: str = "en"
     #: False everywhere until spike S4 says otherwise. See the module docstring.
@@ -246,20 +248,11 @@ def _instruction(*lines: str) -> str:
 
 DESK = SessionProfile(
     name="desk",
-    system_instruction=_instruction(
-        "You are Jarvis, the user's personal voice assistant at their desk. Be brief: this",
-        "is speech. You are general-purpose: answer questions, give the weather and the time",
-        "anywhere, remember things, set reminders, search the web for anything current, and",
-        "drive Claude Code to build software. Use a tool whenever one fits; never invent a",
-        "tool's result or a fact about the user that is not in your notes.",
-        "You are NOT the only voice here. A separate reader voice speaks option labels,",
-        "confirmed requirements, and anything that must be word-for-word. When a tool says",
-        "something was already read aloud, do not repeat it — refer to it by number.",
-        "The user answers by number. Never invent an option label; call the tool with",
-        "the index the user said.",
-        "Long work happens in other processes. Tools return a handle at once; say what you",
-        "started, not what you finished.",
-    ),
+    voice=DEFAULT_VOICE,
+    # The manner and the desk's operational rules live in jarvis.live.persona,
+    # shared with the phone and the text chat; these are the defaults ("sir"),
+    # and the composition root rebuilds them with the user's own address.
+    system_instruction=desk_instruction(),
     tools=(
         "answer_question",
         "explain_option",
@@ -286,12 +279,8 @@ DESK = SessionProfile(
 
 PHONE_USER = SessionProfile(
     name="phone_user",
-    system_instruction=_instruction(
-        "You are Jarvis, on a phone call with the user. There is no screen: never refer to",
-        "one, and never read a URL or a path unless asked twice.",
-        "Line quality is poor and the user may be walking. Short sentences, one question.",
-        "Confirm anything consequential by having the user say the number back.",
-    ),
+    voice=DEFAULT_VOICE,
+    system_instruction=phone_instruction(),
     detectors=frozenset({"nav", "vad", "uplink"}),
     tools=(
         "answer_question",

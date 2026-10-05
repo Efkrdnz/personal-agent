@@ -28,6 +28,13 @@ desk is doing is a heartbeat row; what was said is the event log. Each API call
 opens its OWN connection through ``Services.open_db`` and closes it, because a
 request handler is a process edge and runs on a thread that will not exist in a
 second.
+
+INSIDE THE APP it also carries the app's settings (``/api/setup*``) and its
+processes (``/api/app*``), through two duck-typed objects the composition root
+hands in — this layer may not import ``jarvis.app``. Outside the app both are
+None and those routes answer 503, which is how the page knows to fall back to
+terminal hints. A credential posted to ``/api/setup/secret`` goes to the
+keyring and nowhere else: not into a reply, an error message or the log.
 """
 
 from __future__ import annotations
@@ -64,6 +71,7 @@ from jarvis.window import snapshot
 __all__ = [
     "CSP",
     "MAX_BODY",
+    "MAX_SECRET",
     "STATIC_DIR",
     "Services",
     "WindowServer",
@@ -75,6 +83,10 @@ STATIC_DIR = Path(__file__).parent / "static"
 #: A tool call, a chat line or an answer is a few hundred bytes. Anything near
 #: this is not the page talking.
 MAX_BODY = 64 * 1024
+
+#: No key or token is longer. The same bound the setup service applies; the
+#: window checks it too so a refused value never reaches the app at all.
+MAX_SECRET = 4096
 
 CSP = (
     "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; "
@@ -110,6 +122,10 @@ _DRAIN_CAP = 1024 * 1024
 
 _TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,}")
 _TOKEN_IN_LOG = re.compile(r"([?&]t=)[^&\s\"]+")
+# A request line is the client's to choose. Escaped before it is logged, so a
+# GET carrying ESC sequences cannot retitle or repaint the terminal reading it,
+# and a stray CR cannot overwrite the line that says who asked.
+_LOG_ESCAPES = {c: f"\\x{c:02x}" for c in (*range(0x20), *range(0x7F, 0xA0))}
 _HANGUPS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 
 
@@ -140,6 +156,12 @@ class Services:
     #: Applied to what the window publishes. What the user types is kept in a
     #: log that is kept forever, and a pasted token must not be.
     redactor: Redactor | None = None
+    #: The app's settings and onboarding (``jarvis.app.setup.SetupService``),
+    #: duck-typed: this layer may not import the app. None outside the app.
+    setup: Any | None = None
+    #: The app's processes: ``status() -> {name: {...}}``, ``restart(name)``,
+    #: ``quit()``. None when this window was started on its own.
+    control: Any | None = None
 
 
 class _Refusal(Exception):
@@ -154,9 +176,12 @@ class _Refusal(Exception):
 class _Server(ThreadingHTTPServer):
     """The socket server, plus the per-instance state its handlers share."""
 
-    # Port 0 never needs it, and on Windows SO_REUSEADDR lets another local
-    # process bind the same port and take our connections.
-    allow_reuse_address = False
+    # The app asks for the port it had last time, so a restart must not wait
+    # out TIME_WAIT. Never on Windows, where SO_REUSEADDR means something else:
+    # it lets another socket bind the port we are listening on. Windows needs
+    # nothing to rebind past TIME_WAIT, and SO_EXCLUSIVEADDRUSE would add a wait
+    # to guard against a same-user process, which can read app.json anyway.
+    allow_reuse_address = sys.platform != "win32"
     daemon_threads = True
 
     def __init__(
@@ -215,6 +240,14 @@ class _Server(ThreadingHTTPServer):
                 speak(text)
             except Exception as exc:  # noqa: BLE001 - a dead speaker is a line in the feed
                 self.note_failure(f"I couldn't say that out loud: {exc}")
+
+    def quit_app(self, control: Any) -> None:
+        """Ask the app to quit, from a thread of its own, once the reply has gone."""
+        time.sleep(0.05)  # let the socket drain before the server is torn down
+        try:
+            control.quit()
+        except Exception as exc:  # noqa: BLE001 - nobody waits on this response any more
+            self.note_failure(f"I couldn't quit: {type(exc).__name__}")
 
     def note_failure(self, sentence: str) -> None:
         """Put a failure nobody is waiting on an HTTP response for into the feed."""
@@ -375,7 +408,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._refuse(
                 500,
                 f"Something went wrong in the window server ({type(exc).__name__}); "
-                "the details are in its terminal.",
+                "the details are in its log.",
             )
 
     def _gate(self) -> None:
@@ -455,8 +488,12 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A002 - base signature
         # The stream's ?t= is the one place the token is in a URL. It must not
         # reach a terminal scrollback that gets pasted into a bug report.
-        line = _TOKEN_IN_LOG.sub(r"\1[redacted]", format % args)
-        sys.stderr.write(f"jarvis window: {self.address_string()} {line}\n")
+        line = _TOKEN_IN_LOG.sub(r"\1[redacted]", (format % args).translate(_LOG_ESCAPES))
+        # None under a windowed exe that has not been given a log yet; a log
+        # line is never worth the request it describes.
+        if sys.stderr is not None:
+            with suppress(Exception):
+                sys.stderr.write(f"jarvis window: {self.address_string()} {line}\n")
 
     # -- request bodies -------------------------------------------------------
 
@@ -545,6 +582,7 @@ class _Handler(BaseHTTPRequestHandler):
                 chat_why=s.chat_why,
                 speech_available=s.speak is not None,
                 speech_why=s.speak_why,
+                app=s.control is not None,
             )
         self._json(200, body)
 
@@ -764,6 +802,139 @@ class _Handler(BaseHTTPRequestHandler):
             },
         )
 
+    # -- the app: settings, onboarding, processes ------------------------------
+
+    def _setup(self) -> Any:
+        setup = self.server.services.setup
+        if setup is None:
+            raise _Refusal(
+                503, "Settings live in the Jarvis app; this window was started without it."
+            )
+        return setup
+
+    def _control(self) -> Any:
+        control = self.server.services.control
+        if control is None:
+            raise _Refusal(503, "This window is not running inside the Jarvis app.")
+        return control
+
+    def _app_processes(self) -> dict[str, dict[str, Any]] | None:
+        """The supervisor's view, or None outside the app or when it cannot say."""
+        control = self.server.services.control
+        if control is None:
+            return None
+        try:
+            return _processes(control.status())
+        except Exception:  # noqa: BLE001 - problems still render without it
+            traceback.print_exc(file=sys.stderr)
+            return None
+
+    def _api_setup(self, query: dict[str, list[str]]) -> None:
+        setup = self._setup()
+        procs = self._app_processes()
+        # The supervisor's view is handed over so a held process is a problem
+        # card even when the app built the service without a control.
+        self._json(200, _ask(lambda: setup.status(processes=procs)))
+
+    def _api_setup_secret(self, query: dict[str, list[str]]) -> None:
+        """Store a credential. The value goes to the keyring and nowhere else.
+
+        Not in the reply, not in an error message, not in a traceback: every
+        exception is caught here and turned into a sentence with the value
+        scrubbed out, because a keyring backend is free to quote what it was
+        given and the default handler would print it to the log.
+        """
+        setup = self._setup()
+        body = self._body()
+        name = body.get("name")
+        value = body.get("value")
+        if not isinstance(name, str) or not name:
+            raise _Refusal(400, 'Which key? Send {"name": "...", "value": "..."}.')
+        if not isinstance(value, str) or not value:
+            raise _Refusal(400, "The key is empty.")
+        if len(value.encode("utf-8")) > MAX_SECRET:
+            raise _Refusal(400, f"That is longer than any key (over {MAX_SECRET // 1024} KiB).")
+        if any(ch.isspace() for ch in value):
+            raise _Refusal(
+                400, "A key has no spaces or line breaks in it; check that only the key was pasted."
+            )
+        restart = body.get("restart") is not False
+        try:
+            reply = setup.set_secret(name, value, restart=restart)
+        except ValueError as exc:
+            raise _Refusal(400, _scrub(_sentence(exc, "That key was refused."), value)) from None
+        except RuntimeError as exc:
+            raise _Refusal(
+                502, _scrub(_sentence(exc, "I couldn't store that key."), value)
+            ) from None
+        except Exception as exc:  # noqa: BLE001 - the type alone; the message may hold the value
+            print(f"jarvis window: storing a key failed ({type(exc).__name__})", file=sys.stderr)
+            raise _Refusal(500, "I couldn't store that key.") from None
+        restarted = reply.get("restarted", []) if isinstance(reply, dict) else []
+        self._json(200, {"ok": True, "present": True, "restarted": list(restarted)})
+
+    def _api_setup_setting(self, query: dict[str, list[str]]) -> None:
+        setup = self._setup()
+        body = self._body()
+        key = body.get("key")
+        if not isinstance(key, str) or not key:
+            raise _Refusal(400, 'Which setting? Send {"key": "...", "value": ...}.')
+        if "value" not in body:
+            raise _Refusal(400, f"What should {key} be? value is missing.")
+        restart = body.get("restart") is not False
+        reply = _ask(lambda: setup.set_setting(key, body["value"], restart=restart))
+        self._json(200, {**(reply if isinstance(reply, dict) else {}), "ok": True})
+
+    def _api_setup_wake(self, query: dict[str, list[str]]) -> None:
+        setup = self._setup()
+        body = self._body()
+        restart = body.get("restart") is not False
+        reply = _ask(lambda: setup.download_wake(restart=restart))
+        self._json(200, {**(reply if isinstance(reply, dict) else {}), "ok": True})
+
+    def _api_setup_preview(self, query: dict[str, list[str]]) -> None:
+        setup = self._setup()
+        body = self._body()
+        voice = body.get("voice")
+        if not isinstance(voice, str) or not voice.strip():
+            raise _Refusal(400, 'Which voice? Send {"voice": "Charon"}.')
+        # The service plays on a thread of its own and returns at once.
+        reply = _ask(lambda: setup.preview(voice.strip()))
+        self._json(200, {**(reply if isinstance(reply, dict) else {}), "ok": True})
+
+    def _api_setup_claude(self, query: dict[str, list[str]]) -> None:
+        setup = self._setup()
+        self._body()
+        reply = _ask(setup.sign_in_claude)
+        self._json(200, {**(reply if isinstance(reply, dict) else {}), "ok": True})
+
+    def _api_app(self, query: dict[str, list[str]]) -> None:
+        control = self._control()
+        status = _ask(control.status)
+        body: dict[str, Any] = dict(status) if isinstance(status, dict) else {}
+        body.update(ok=True, app=True, processes=_processes(status))
+        self._json(200, body)
+
+    def _api_app_restart(self, query: dict[str, list[str]]) -> None:
+        control = self._control()
+        body = self._body()
+        name = body.get("process")
+        if not isinstance(name, str) or not name:
+            raise _Refusal(400, 'Which process? Send {"process": "desk"}.')
+        _ask(lambda: control.restart(name))
+        self._json(200, {"ok": True, "message": f"Restarting {_PROCESS_WORDS.get(name, name)}."})
+
+    def _api_app_quit(self, query: dict[str, list[str]]) -> None:
+        control = self._control()
+        self._body()
+        self._json(200, {"ok": True, "message": "Shutting down. Good night."})
+        self.wfile.flush()
+        # After the reply is on the wire: quitting tears down this very server,
+        # and a reply cut off mid-write would read as the quit having failed.
+        threading.Thread(
+            target=self.server.quit_app, args=(control,), name="window-quit", daemon=True
+        ).start()
+
 
 _Route = Callable[[_Handler, dict[str, list[str]]], None]
 
@@ -776,6 +947,22 @@ _ROUTES: dict[str, tuple[str, _Route]] = {
     "/api/say": ("POST", _Handler._api_say),
     "/api/answer": ("POST", _Handler._api_answer),
     "/api/stop": ("POST", _Handler._api_stop),
+    "/api/setup": ("GET", _Handler._api_setup),
+    "/api/setup/secret": ("POST", _Handler._api_setup_secret),
+    "/api/setup/setting": ("POST", _Handler._api_setup_setting),
+    "/api/setup/wake": ("POST", _Handler._api_setup_wake),
+    "/api/setup/preview": ("POST", _Handler._api_setup_preview),
+    "/api/setup/claude": ("POST", _Handler._api_setup_claude),
+    "/api/app": ("GET", _Handler._api_app),
+    "/api/app/restart": ("POST", _Handler._api_app_restart),
+    "/api/app/quit": ("POST", _Handler._api_app_quit),
+}
+
+#: The supervisor's names, as a sentence says them.
+_PROCESS_WORDS: dict[str, str] = {
+    "desk": "the desk",
+    "schedule": "the scheduler",
+    "telegram": "Telegram",
 }
 
 
@@ -801,3 +988,56 @@ def _required_text(body: dict[str, Any], key: str) -> str:
 
 def _late(state: str) -> str:
     return "already answered" if state in ("answered", "consumed") else f"it was {state}"
+
+
+def _ask(fn: Callable[[], Any]) -> Any:
+    """Call into the app. Its ValueError is a bad request, its RuntimeError a failure.
+
+    Both carry a sentence written for the person at the window; anything else
+    is a bug and goes to the default handler (a generic 500, a traceback in
+    the log).
+    """
+    try:
+        return fn()
+    except _Refusal:
+        raise
+    except (ValueError, LookupError) as exc:
+        raise _Refusal(400, _sentence(exc, "That was refused.")) from exc
+    except RuntimeError as exc:
+        raise _Refusal(502, _sentence(exc, "That didn't work.")) from exc
+
+
+def _sentence(exc: BaseException, fallback: str) -> str:
+    # str(KeyError("x")) is "'x'", quotes and all; its argument is the sentence.
+    raw = exc.args[0] if isinstance(exc, KeyError) and exc.args else str(exc)
+    return snapshot.plain_sentence(str(raw), fallback)
+
+
+def _scrub(sentence: str, value: str) -> str:
+    return sentence.replace(value, "[hidden]") if value else sentence
+
+
+def _processes(status: Any) -> dict[str, dict[str, Any]]:
+    """The supervisor's status as the page reads it, reasons command-free.
+
+    Accepts ``{name: {...}}`` (the supervisor's own shape) or the same under a
+    ``processes`` key, so the page does not care which the app hands over.
+    """
+    if not isinstance(status, dict):
+        return {}
+    procs = status.get("processes") if isinstance(status.get("processes"), dict) else status
+    out: dict[str, dict[str, Any]] = {}
+    for name, p in procs.items():
+        if not isinstance(name, str) or not isinstance(p, dict):
+            continue
+        pid, restarts, last_exit = p.get("pid"), p.get("restarts"), p.get("last_exit")
+        out[name] = {
+            "running": p.get("running") is True,
+            "held": p.get("held") is True,
+            "pid": pid if isinstance(pid, int) and not isinstance(pid, bool) else None,
+            "restarts": restarts if isinstance(restarts, int) else 0,
+            "last_exit": last_exit if isinstance(last_exit, int) else None,
+            "reason": snapshot.plain_sentence(str(p.get("reason") or "")),
+            "log": str(p.get("log") or ""),
+        }
+    return out

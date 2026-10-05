@@ -27,7 +27,10 @@ aec = ["pywebrtc-audio>=0.2"]
 # sheet's gemini-3.1-flash-live-preview is legacy. The SDK README warns to pin
 # below 3.0.0.
 live = ["google-genai>=2.23,<3"]
-tts = ["edge-tts>=7"]
+# Microsoft's neural voices (the British "Ryan" reader), over the network. Edge
+# sends MP3; miniaudio decodes it in-process, because Windows has no ffmpeg and
+# without a decoder that voice can never play there.
+tts = ["edge-tts>=7", "miniaudio>=1.59"]
 # The OS keyring. Optional at import time and imported INSIDE the functions that
 # use it (jarvis/secrets.py), because every process opens that module and the
 # spine has to keep importing under `python -S`. Without it, credentials come
@@ -42,7 +45,21 @@ geo = ["maxminddb>=2.6"]
 # scikit-learn, and on Linux requires tflite-runtime, which has no wheels past
 # Python 3.11). See jarvis/audio/wake.py.
 wake = ["onnxruntime>=1.17"]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
+# The double-clickable app's tray icon (Open Jarvis / Restart voice / Quit).
+# Optional: without it the app runs with no icon and the HUD's own Quit ends it.
+# Pillow also draws that icon, so the frozen build carries no image file.
+app = ["pystray>=0.19.5", "pillow>=10"]
+# Building Jarvis.exe (packaging/jarvis.spec). Never needed to RUN anything.
+build = ["pyinstaller>=6.10"]
+# pyyaml: tests/test_packaging.py parses the Windows workflow, because a
+# workflow that does not parse fails on GitHub and nowhere a test would see it.
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6", "pyyaml>=6"]
+
+# A double-clickable launcher with no console: `.venv\Scripts\Jarvis.exe` on
+# Windows. The same function is the frozen exe's entry (packaging/jarvis_app.py),
+# so the pip install and the built app start the same way.
+[project.gui-scripts]
+Jarvis = "jarvis.app.entry:main"
 
 [build-system]
 requires = ["hatchling"]

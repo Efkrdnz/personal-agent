@@ -17,6 +17,7 @@ The direction is inwards, always:
     the desk (voice, audio) knows the spine and the project lifecycle
     the driver (cc) knows the spine, and neither a channel nor a sound card
     only the top-level apps know all three
+    the app (jarvis/app) may know everybody, and nobody may know the app
 
 WHY THE AST AND NOT A GREP. Half the modules here NAME other layers in their
 docstrings on purpose — that is how a reader finds out where the numbering lives —
@@ -76,6 +77,9 @@ RULES: dict[str, tuple[str, ...]] = {
         # `python -S` on a box with neither.
         "jarvis.geo",
         "jarvis.window",
+        # The double-clickable app: a supervisor, a tray icon, a single-instance
+        # lock. Every process opens the spine; none of them may need a tray.
+        "jarvis.app",
     ),
     # A channel reaches Claude Code through rows in ``requests`` and nothing
     # else. Importing the desk would make it unable to run on a headless box,
@@ -91,6 +95,7 @@ RULES: dict[str, tuple[str, ...]] = {
         # could import it could brief the user on itself.
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     "jarvis/capture": (
         "jarvis.cc",
@@ -100,6 +105,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.github",
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     # An outward PROVIDER adapter: it reaches GitHub over HTTPS and knows the
     # spine's vocabulary (jarvis.effects owns the promise words its spoken line is
@@ -125,6 +131,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.briefing",
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     # THE PROJECT LIFECYCLE: above the github client, below everything that
     # speaks. It raises `requests` rows, writes `effects` and `outbox` rows and
@@ -143,6 +150,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.capture",
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     # A BRIEFING DOES NOT KNOW HOW IT IS DELIVERED. That is the whole point of
     # the stage: a section is a row in `requests`, and which channel says it is
@@ -159,6 +167,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.telegram",
         "jarvis.capture",
         "jarvis.window",
+        "jarvis.app",
     ),
     # THE SCHEDULER NEVER SPEAKS AND NEVER DIALS. It knows the spine, it asks
     # presence where the user is, and it writes `deliveries` rows naming a
@@ -180,6 +189,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.project",
         "jarvis.briefing",
         "jarvis.window",
+        "jarvis.app",
     ),
     # THE TOOL SURFACE: what a spoken sentence is allowed to make happen. It sits
     # ABOVE the lifecycle and BELOW everything that has a microphone or a socket,
@@ -197,6 +207,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.live",
         "jarvis.telegram",
         "jarvis.window",
+        "jarvis.app",
     ),
     # WHERE AND WHAT THE SKY IS DOING: an outward provider adapter, like the
     # GitHub client. It fetches public JSON and reads a local GeoLite2 file, and
@@ -217,6 +228,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.schedule",
         "jarvis.tools",
         "jarvis.window",
+        "jarvis.app",
     ),
     # The desk speaks and listens. Which channel is attached is not its business,
     # and the driver is a process it talks to through the database.
@@ -226,6 +238,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.github",
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     "jarvis/audio": (
         "jarvis.cc",
@@ -233,6 +246,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.github",
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     # The other half of the same seam, and the half the answer-shape move was
     # about: the driver NEVER SPEAKS and does not know which channel is attached.
@@ -250,6 +264,7 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.briefing",
         "jarvis.schedule",
         "jarvis.window",
+        "jarvis.app",
     ),
     # THE HUD. The top of the stack, beside the composition root: it reads the
     # rows every process writes and writes a few of its own (a tool call, an
@@ -267,7 +282,19 @@ RULES: dict[str, tuple[str, ...]] = {
         "jarvis.github",
         "jarvis.project",
         "jarvis.briefing",
+        # The window is handed its setup service and its process control as
+        # duck-typed objects. `python -m jarvis window` runs with no app at all,
+        # and a window that imported the app could only ever run inside it.
+        "jarvis.app",
     ),
+    # THE APP: the top, beside the composition root. It starts the other
+    # processes, owns the tray icon and the single-instance lock, and carries the
+    # decisions `jarvis/__main__.py` must not (what a refusal holds, when a crash
+    # restarts) in modules with tests. Knowing every layer is its job, so it is
+    # forbidden nothing; the other half of the rule is that NOTHING may import
+    # it — every other list here names `jarvis.app`, because a process that
+    # needed the app to start could not be started by it.
+    "jarvis/app": (),
 }
 
 

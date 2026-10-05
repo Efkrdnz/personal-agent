@@ -4,7 +4,7 @@
   writes it with textContent so nothing said aloud can ever become markup here.
   The server's CSP forbids inline script and style, so this file has neither.
 -->
-<html lang="en">
+<html lang="en" data-app="unknown">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -71,6 +71,8 @@
   <main class="hud">
     <!-- The desk: is anyone listening, and can anything be heard? -->
     <section class="status panel" aria-label="Desk status">
+      <!-- What is wrong right now, each with the button that fixes it. -->
+      <div class="problems" id="problems" aria-live="polite"></div>
       <div class="reactor-wrap">
         <div class="orb" id="orb" data-state="unknown" role="img" aria-labelledby="orb-state">
           <div class="orb-halo"></div>
@@ -121,6 +123,7 @@
       <div class="status-text">
         <p class="orb-state" id="orb-state">Connecting</p>
         <p class="orb-note" id="orb-note"></p>
+        <button class="btn btn-quiet orb-action" id="orb-action" type="button" hidden></button>
         <button class="attention" id="attention" type="button" hidden></button>
       </div>
 
@@ -207,6 +210,16 @@
                 aria-controls="panel-hearing" aria-selected="false" tabindex="-1">
           <span class="tab-count" id="count-hearing">00</span><span class="tab-label">Hearing</span>
         </button>
+        <button class="tab tab-settings" role="tab" type="button" id="tab-settings" data-tab="settings"
+                aria-controls="panel-settings" aria-selected="false" tabindex="-1">
+          <span class="tab-count tab-gear" aria-hidden="true">
+            <svg viewBox="0 0 24 24" focusable="false">
+              <circle class="gear-teeth" cx="12" cy="12" r="8.2"/>
+              <circle class="gear-ring" cx="12" cy="12" r="5.4"/>
+              <circle class="gear-hub" cx="12" cy="12" r="1.9"/>
+            </svg>
+          </span><span class="tab-label">Settings</span>
+        </button>
       </div>
 
       <div class="tabpanels">
@@ -241,7 +254,8 @@
         <section class="tabpanel" role="tabpanel" id="panel-reminders" aria-labelledby="tab-reminders" hidden>
           <p class="warn-note" id="schedule-warn" hidden>
             The scheduler is not running, so reminders will not be said when they are due.
-            Start it with <code>python -m jarvis.schedule</code>.
+            <span data-terminal>Start it with <code>python -m jarvis.schedule</code>.</span>
+            <button class="btn btn-quiet warn-action" id="schedule-restart" type="button" hidden>Restart the scheduler</button>
           </p>
           <h3 class="eyebrow">Set a reminder</h3>
           <form class="form" id="remind-form" autocomplete="off">
@@ -295,6 +309,159 @@
           <ul class="rows" id="hearing-list"></ul>
           <p class="empty" id="hearing-empty">No corrections yet. When it mishears a word, teach it here.</p>
         </section>
+
+        <section class="tabpanel settings" role="tabpanel" id="panel-settings" aria-labelledby="tab-settings" hidden>
+          <p class="warn-note" id="settings-off" hidden>
+            Settings live in the Jarvis app, and this window was opened without it.
+            <span data-terminal>Start the app with <code>python -m jarvis</code>.</span>
+          </p>
+          <div class="settings-body" id="settings-body">
+
+            <section class="set-group" aria-labelledby="set-h-voice">
+              <h3 class="eyebrow" id="set-h-voice">Voice</h3>
+              <div class="set-row">
+                <label class="set-label" for="set-gemini-voice">Jarvis's voice</label>
+                <div class="set-inline">
+                  <select class="set-input" id="set-gemini-voice" data-key="voice.gemini_voice" data-kind="text"></select>
+                  <button class="btn icon-btn" id="preview-voice" type="button"
+                          aria-label="Play a sample of this voice" title="Play a sample">
+                    <svg class="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="M4.5 3v10l8.5-5z"/></svg>
+                  </button>
+                </div>
+                <span class="set-hint">The conversational voice. Gemini's own; Charon is the closest to a butler.</span>
+              </div>
+              <div class="set-row">
+                <label class="set-label" for="set-reader-voice">Reading voice</label>
+                <select class="set-input" id="set-reader-voice" data-key="voice.reader_voice" data-kind="text"></select>
+                <span class="set-hint">Reads questions and exact words aloud. Deliberately a different voice, so you can tell the two apart.</span>
+              </div>
+              <div class="set-row">
+                <label class="set-label" for="set-mic">Microphone</label>
+                <select class="set-input" id="set-mic" data-key="voice.input_device" data-kind="text"></select>
+                <span class="set-hint" id="set-mic-hint">Only devices that can both listen and speak are listed. A headset is ideal.</span>
+              </div>
+              <div class="set-row">
+                <label class="set-label" for="set-wake-word">Wake word</label>
+                <select class="set-input" id="set-wake-word" data-key="voice.wake_word" data-kind="text"></select>
+                <div class="wake-line" id="wake-line">
+                  <span class="pill" id="wake-pill">—</span>
+                  <button class="btn btn-quiet" id="wake-download" type="button" hidden>Download the model</button>
+                </div>
+                <span class="set-hint set-licence" id="wake-licence"></span>
+              </div>
+              <div class="set-row">
+                <label class="set-label" for="set-wake-threshold">Wake sensitivity <output class="set-out" id="set-wake-out" for="set-wake-threshold"></output></label>
+                <input class="set-range" id="set-wake-threshold" type="range" min="0.1" max="0.9" step="0.05"
+                       data-key="voice.wake_threshold" data-kind="number">
+                <span class="set-hint">Lower hears you from further away, and wakes for the television more often.</span>
+              </div>
+            </section>
+
+            <section class="set-group" aria-labelledby="set-h-you">
+              <h3 class="eyebrow" id="set-h-you">You</h3>
+              <div class="set-row">
+                <span class="set-label" id="set-address-label">How shall I address you?</span>
+                <div class="segmented" id="set-address" role="radiogroup" aria-labelledby="set-address-label"></div>
+                <input class="set-input" id="set-address-other" type="text" maxlength="40"
+                       placeholder="or by name, e.g. Mr. Stark" aria-label="Another way to address you"
+                       data-key="persona.address" data-kind="text">
+              </div>
+              <div class="set-row">
+                <label class="set-label" for="set-name">Your name</label>
+                <input class="set-input" id="set-name" type="text" maxlength="80" placeholder="optional"
+                       data-key="persona.name" data-kind="text">
+              </div>
+            </section>
+
+            <section class="set-group" aria-labelledby="set-h-place">
+              <h3 class="eyebrow" id="set-h-place">Place and time</h3>
+              <div class="set-row">
+                <label class="set-label" for="set-city">City</label>
+                <input class="set-input" id="set-city" type="text" maxlength="120" placeholder="e.g. Istanbul"
+                       data-key="location.city" data-kind="text">
+                <span class="set-hint">Empty, and I work out roughly where you are from your connection.</span>
+              </div>
+              <div class="set-row set-row-pair">
+                <div>
+                  <label class="set-label" for="set-units">Units</label>
+                  <select class="set-input" id="set-units" data-key="location.units" data-kind="text"></select>
+                </div>
+                <div>
+                  <label class="set-label" for="set-tz">Time zone</label>
+                  <input class="set-input" id="set-tz" type="text" list="tz-list" maxlength="64"
+                         data-key="tz" data-kind="text" spellcheck="false">
+                  <datalist id="tz-list"></datalist>
+                </div>
+              </div>
+            </section>
+
+            <section class="set-group" aria-labelledby="set-h-hearing">
+              <h3 class="eyebrow" id="set-h-hearing">Hearing</h3>
+              <div class="set-row">
+                <label class="set-label" for="set-vocab">Words I should know</label>
+                <textarea class="set-input" id="set-vocab" rows="2" data-key="voice.vocabulary" data-kind="list"
+                          placeholder="names, jargon, project names — one per line"></textarea>
+              </div>
+              <div class="set-row">
+                <label class="set-label" for="set-langs">Languages you speak</label>
+                <input class="set-input" id="set-langs" type="text" maxlength="200" placeholder="en-GB, tr-TR"
+                       data-key="voice.languages" data-kind="list" spellcheck="false">
+                <span class="set-hint">Empty, and I detect it as you speak.</span>
+              </div>
+            </section>
+
+            <section class="set-group" aria-labelledby="set-h-keys">
+              <h3 class="eyebrow" id="set-h-keys">Keys</h3>
+              <p class="set-hint">
+                Kept in your system's keyring, never in a file; I only ever show whether one is stored.
+                A Gemini key is free from <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Google AI Studio</a>.
+              </p>
+              <ul class="secret-list" id="secret-list"></ul>
+            </section>
+
+            <section class="set-group" aria-labelledby="set-h-claude">
+              <h3 class="eyebrow" id="set-h-claude">Claude Code</h3>
+              <div class="set-row">
+                <button class="btn" id="claude-signin" type="button">Sign in to Claude Code</button>
+                <span class="set-hint">Builds run on your own Claude account. The sign-in is Claude's, in your browser; I never see the password.</span>
+              </div>
+            </section>
+
+            <section class="set-group" aria-labelledby="set-h-app">
+              <h3 class="eyebrow" id="set-h-app">The app</h3>
+              <label class="switch set-switch">
+                <input type="checkbox" id="set-autostart" data-key="app.start_with_windows" data-kind="bool">
+                <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+                <span class="switch-label">Start with Windows</span>
+              </label>
+              <label class="switch set-switch">
+                <input type="checkbox" id="set-telegram" data-key="app.start_telegram" data-kind="bool">
+                <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+                <span class="switch-label">Start the Telegram bot too</span>
+              </label>
+              <label class="switch set-switch">
+                <input type="checkbox" id="set-open-window" data-key="app.open_window_on_start" data-kind="bool">
+                <span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span>
+                <span class="switch-label">Open this window when Jarvis starts</span>
+              </label>
+            </section>
+
+            <section class="set-group" id="set-processes" aria-labelledby="set-h-proc" hidden>
+              <h3 class="eyebrow" id="set-h-proc">Processes</h3>
+              <ul class="proc-list" id="proc-list"></ul>
+            </section>
+
+            <div class="set-foot">
+              <button class="btn" id="rerun-setup" type="button">Run first-time setup again</button>
+              <button class="hold-btn" id="quit" type="button" hidden
+                      aria-label="Quit Jarvis. Hold for one second." title="Hold for one second to quit Jarvis">
+                <span class="hold-fill" aria-hidden="true"></span>
+                <span class="hold-word">Quit Jarvis</span>
+                <span class="hold-hint">hold 1 s</span>
+              </button>
+            </div>
+          </div>
+        </section>
       </div>
     </aside>
   </main>
@@ -315,11 +482,113 @@
 <div class="gate" id="gate" hidden>
   <div class="gate-box" role="alertdialog" aria-labelledby="gate-title" aria-describedby="gate-body">
     <p class="gate-eyebrow">Locked</p>
-    <h1 class="gate-title" id="gate-title">Open this from <code>python -m jarvis window</code>.</h1>
+    <h1 class="gate-title" id="gate-title">Open this window from Jarvis.</h1>
     <p class="gate-body" id="gate-body">
       The window opens with a one-time key in its address, and this page was reached without one.
-      Close it and run the command again; the new window carries a fresh key.
+      Close it, then open Jarvis again from its icon or the tray's <em>Open Jarvis</em>; the new
+      window carries a fresh key.
+      <span data-terminal>Started from a terminal? Run <code>python -m jarvis window</code> again.</span>
     </p>
+  </div>
+</div>
+
+<!-- First run: a short conversation, in Jarvis's voice, that ends with him listening. -->
+<div class="onboard" id="onboard" hidden>
+  <div class="onboard-box" role="dialog" aria-modal="true" aria-labelledby="onboard-greet" aria-describedby="onboard-intro">
+    <div class="onboard-head">
+      <div class="onboard-mark" aria-hidden="true">
+        <svg viewBox="0 0 64 64" focusable="false">
+          <circle class="om-ring" cx="32" cy="32" r="29"/>
+          <circle class="om-ticks" cx="32" cy="32" r="25"/>
+          <circle class="om-coil" cx="32" cy="32" r="17"/>
+          <circle class="om-core" cx="32" cy="32" r="8"/>
+        </svg>
+      </div>
+      <div class="onboard-titles">
+        <p class="onboard-eyebrow">J.A.R.V.I.S. · first-time setup</p>
+        <ol class="onboard-steps" id="onboard-steps" aria-label="Setup steps">
+          <li data-step="key"><span>Key</span></li>
+          <li data-step="mic"><span>Microphone</span></li>
+          <li data-step="name"><span>Address</span></li>
+          <li data-step="city"><span>Place</span></li>
+          <li data-step="done"><span>Ready</span></li>
+        </ol>
+      </div>
+    </div>
+
+    <h1 class="onboard-greet" id="onboard-greet">Good evening.</h1>
+    <p class="onboard-intro" id="onboard-intro">I'm J.A.R.V.I.S. A few details and I'll be at your service.</p>
+
+    <section class="onboard-step" data-step="key" aria-labelledby="ob-h-key">
+      <h2 class="onboard-q" id="ob-h-key">First, the key to my voice.</h2>
+      <p class="onboard-say">I listen and speak through Google's Gemini. Paste an API key and I'll keep it in your system's keyring. It never goes in a file.</p>
+      <form class="onboard-form" id="ob-key-form" autocomplete="off">
+        <label class="field">
+          <span class="field-label">Gemini API key</span>
+          <input class="set-input" id="ob-key" type="password" autocomplete="off" spellcheck="false"
+                 placeholder="paste it here" maxlength="4096">
+        </label>
+        <button class="btn btn-primary" type="submit">Store it</button>
+      </form>
+      <p class="onboard-note" id="ob-key-state" aria-live="polite"></p>
+      <p class="onboard-link">
+        No key yet? <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener noreferrer">Get one free at Google AI Studio</a>, then paste it above.
+      </p>
+    </section>
+
+    <section class="onboard-step" data-step="mic" aria-labelledby="ob-h-mic" hidden>
+      <h2 class="onboard-q" id="ob-h-mic">Which microphone shall I listen on?</h2>
+      <p class="onboard-say">A headset is best: I can't hear myself in it, so you can interrupt me.</p>
+      <div class="choice-list" id="ob-mics" role="radiogroup" aria-labelledby="ob-h-mic"></div>
+      <p class="onboard-note" id="ob-mic-why"></p>
+    </section>
+
+    <section class="onboard-step" data-step="name" aria-labelledby="ob-h-name" hidden>
+      <h2 class="onboard-q" id="ob-h-name">And what shall I call you?</h2>
+      <div class="segmented segmented-lg" id="ob-address" role="radiogroup" aria-labelledby="ob-h-name"></div>
+      <label class="field">
+        <span class="field-label">Your name, if you'd like me to know it</span>
+        <input class="set-input" id="ob-name" type="text" maxlength="80" autocomplete="given-name" placeholder="optional">
+      </label>
+    </section>
+
+    <section class="onboard-step" data-step="city" aria-labelledby="ob-h-city" hidden>
+      <h2 class="onboard-q" id="ob-h-city">Where are you, roughly?</h2>
+      <p class="onboard-say">For the weather and the time. Leave it empty and I'll work it out from your connection, approximately.</p>
+      <label class="field">
+        <span class="field-label">City</span>
+        <input class="set-input" id="ob-city" type="text" maxlength="120" autocomplete="address-level2" placeholder="e.g. Istanbul">
+      </label>
+      <div class="segmented" id="ob-units" role="radiogroup" aria-label="Units"></div>
+    </section>
+
+    <section class="onboard-step" data-step="done" aria-labelledby="ob-h-done" hidden>
+      <h2 class="onboard-q" id="ob-h-done">Very good.</h2>
+      <p class="onboard-say" id="ob-done-say">I'll start listening now.</p>
+      <ul class="onboard-summary" id="ob-summary"></ul>
+    </section>
+
+    <div class="onboard-wake" id="ob-wake" hidden>
+      <p class="onboard-wake-line"><span class="pill" id="ob-wake-pill">—</span> <span id="ob-wake-text"></span>
+        <button class="btn btn-quiet" id="ob-wake-retry" type="button" hidden>Try again</button></p>
+      <p class="onboard-licence" id="ob-wake-licence"></p>
+    </div>
+
+    <div class="onboard-nav">
+      <button class="btn btn-quiet" id="ob-later" type="button">Later</button>
+      <span class="onboard-spacer"></span>
+      <button class="btn" id="ob-back" type="button">Back</button>
+      <button class="btn btn-primary" id="ob-next" type="button">Continue</button>
+    </div>
+  </div>
+</div>
+
+<!-- After Quit: the page outlives the server it came from, and says so. -->
+<div class="gate" id="farewell" hidden>
+  <div class="gate-box gate-calm" role="alertdialog" aria-labelledby="farewell-title" aria-describedby="farewell-body">
+    <p class="gate-eyebrow">Offline</p>
+    <h1 class="gate-title" id="farewell-title">Jarvis has shut down.</h1>
+    <p class="gate-body" id="farewell-body">Every process has been stopped. You can close this window; double-click Jarvis to start again.</p>
   </div>
 </div>
 

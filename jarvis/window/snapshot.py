@@ -28,6 +28,7 @@ whole window.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from collections.abc import Callable, Mapping
 from datetime import datetime
@@ -58,6 +59,7 @@ __all__ = [
     "jobs",
     "notes",
     "pending",
+    "plain_sentence",
     "presence",
     "previous_kind",
     "processes",
@@ -111,9 +113,15 @@ def state(
     chat_why: str,
     speech_available: bool,
     speech_why: str,
+    app: bool = False,
     now_ts: str | None = None,
 ) -> dict[str, Any]:
-    """Everything ``GET /api/state`` returns, in the contract's shape."""
+    """Everything ``GET /api/state`` returns, in the contract's shape.
+
+    ``app`` says whether this window runs inside the Jarvis app, which starts
+    and restarts the other processes itself. The page branches on it: inside
+    the app it never tells anybody to type a command.
+    """
     ts = now_ts or now()
     errors: list[str] = []
 
@@ -150,6 +158,7 @@ def state(
             "why": "" if speech_available else speech_why,
         },
         "tools": tools,
+        "app": bool(app),
         "errors": errors,
     }
 
@@ -641,6 +650,36 @@ def _job(phrase: str, *, only_to: str | None = None) -> _Renderer:
     return render
 
 
+#: How the feed names a process the app supervises.
+_PROCESS_WORDS: Mapping[str, str] = {
+    "desk": "desk",
+    "schedule": "scheduler",
+    "telegram": "Telegram",
+}
+
+
+def _desk_refused(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    why = plain_sentence(_s(body, "sentence"))
+    return "system", f"desk couldn't start: {why}" if why else "desk couldn't start"
+
+
+def _process_exited(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    name = _s(body, "process")
+    if not name:
+        return None
+    who = _PROCESS_WORDS.get(name, name)
+    code = body.get("code")
+    why = plain_sentence(_s(body, "reason"))
+    if code == 0:
+        head = f"{who} stopped"
+    elif code == 2:
+        # Exit 2 is a refusal: the process said why and waits to be fixed.
+        head = f"{who} is waiting for you"
+    else:
+        head = f"{who} stopped unexpectedly" + (f" (exit {code})" if isinstance(code, int) else "")
+    return "system", f"{head}: {why}" if why else head
+
+
 def _command(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
     if body.get("verb") != "stop_all":
         return None
@@ -677,7 +716,64 @@ _RENDERERS: Mapping[str, _Renderer] = {
     "job.blocked": _job("is waiting for you"),
     "job.deferred": _job("is parked until you answer"),
     "command.issued": _command,
+    "desk.refused": _desk_refused,
+    "app.process_exited": _process_exited,
+    "app.started": _notice("system", "Jarvis is online"),
 }
+
+
+# ───────────────────────────── sentences without commands ─────────────────────────────
+
+# What makes a fragment an instruction to a terminal: a quoted command, or an
+# interpreter or package manager invoked. The window inside the app has a
+# button for every one of those fixes.
+_COMMANDISH = re.compile(
+    r"`[^`]*`|\bpython3?(?:\.exe)?\s+-[mc]\b|\bpy\s+-m\b|\bpip\s+install\b"
+    r"|\buv\s+(?:pip|venv|run)\b|\bsudo\b|\bapt(?:-get)?\s+install\b|\bbrew\s+install\b"
+    r"|\.venv\b|\bexport\s+[A-Z_]+=|\bjarvis\s+(?:secrets|wake|desk|window|doctor)\b",
+    re.I,
+)
+_PARENS = re.compile(r"\s*\([^()]*\)")
+_COMMAND_TAIL = re.compile(
+    r"\s*(?:[:;\u2014\u2013]|\s-)\s*(?:run|try|use|start it with|store it with|with|or)?\s*:?\s*"
+    r"`?(?:python3?|py|pip|uv|sudo|apt)\b.*$",
+    re.I,
+)
+_SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+# A sentence cut at its command and left ending on one of these was ALL
+# instruction ("Store it with: python -m ..."), and its stump says nothing.
+_STUMP = re.compile(r"\b(?:with|run|try|use|using|via|by|to|set|it|is)$", re.I)
+
+
+def plain_sentence(text: str, fallback: str = "") -> str:
+    """The headline of a refusal, with every terminal instruction taken out.
+
+    Refusals in this tree end with the command that fixes them, which is right
+    in a terminal and wrong in a window whose user has never opened one. This
+    keeps the first line that says something once its commands are gone —
+    "Chat needs the Gemini key: python -m ..." becomes "Chat needs the Gemini
+    key." — and returns ``fallback`` when nothing is left.
+    """
+    if not isinstance(text, str):
+        return fallback
+    kept: list[str] = []
+    for raw in text.splitlines():
+        line = _PARENS.sub(lambda m: "" if _COMMANDISH.search(m.group()) else m.group(), raw)
+        for sentence in _SENTENCE_END.split(line.strip()):
+            cut = _COMMAND_TAIL.sub("", sentence).strip()
+            if cut != sentence.strip() and (kept or _STUMP.search(cut)):
+                continue  # past the headline, a sentence that led to a command WAS the command
+            if cut and not _COMMANDISH.search(cut):
+                kept.append(cut)
+        if kept:
+            break  # the first line that says something is the headline
+    out = " ".join(kept).strip(" ,;:")
+    if not out:
+        return fallback
+    first = out.split(" ", 1)[0]
+    if first.isalpha() and first.islower():
+        out = out[0].upper() + out[1:]
+    return out if out[-1] in ".!?…" else out + "."
 
 
 # ───────────────────────────── time, said back ─────────────────────────────

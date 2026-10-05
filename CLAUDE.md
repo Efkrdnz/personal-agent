@@ -104,9 +104,11 @@ jarvis/           the spine — one SQLite file, several processes, stdlib only
   liveness.py     which processes are running, as heartbeat rows in `cursors`
 jarvis/tools/     what a spoken sentence is allowed to make happen
 jarvis/window/    the HUD: a stdlib HTTP server on 127.0.0.1 + one static page; reads rows, never memory
+jarvis/app/       the double-clickable app: one instance, hidden children, tray, first-run setup
 jarvis/cc/        the Claude Code driver — its own OS process, never speaks
 jarvis/__main__.py  THE composition root. The one file allowed to know every layer
 spikes/           experiments with recorded results; they stay runnable
+packaging/        Jarvis.exe: the PyInstaller spec, built and self-tested on Windows in CI
 tools/            CI guards and probes
 docs/             findings, architecture, roadmap, ADRs
 ```
@@ -123,6 +125,14 @@ python -m jarvis desk              # listen, talk, drive Claude Code
 `doctor` is the front door. A voice assistant fails at startup with no screen and no log anybody will
 find, so the whole of "why won't it start" is one command. [`docs/setup.md`](docs/setup.md) is the same
 thing in prose, for the parts that happen in a browser.
+
+**For the user it is one exe.** `python -m jarvis app` (frozen: `Jarvis.exe`, pip: `.venv\Scripts\Jarvis.exe`)
+starts the window, the desk, the scheduler and the bot as hidden children, and the window's first-run
+screen does what `secrets set` and `config init` do. Frozen, `sys.executable` IS `Jarvis.exe`, so every
+`[sys.executable, "-m", ...]` spawn goes through `jarvis/app/entry.py`'s explicit table — a new `-m`
+target must be added there or the built app cannot start it. A windowed exe has no console: any console
+program it runs (git, ffmpeg, PowerShell) needs `CREATE_NO_WINDOW` or it flashes a black window.
+[`docs/app.md`](docs/app.md) has the build and the release.
 
 ## Two falsifiable tests
 

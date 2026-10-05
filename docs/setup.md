@@ -1,5 +1,9 @@
 # Setting it up
 
+> **On Windows and just want to use Jarvis?** Read **[the app guide](app.md)** instead of this page:
+> download a folder, double-click `Jarvis.exe`, and every step below happens inside Jarvis's own window.
+> No terminal, no install line. This page is the developer's path, from a source checkout.
+
 Everything here is a thing only you can do: a browser, a password prompt, a physical device. Anything a
 command can do for you is already in one command:
 
@@ -19,7 +23,7 @@ Linux or macOS:
 
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,dev]"
+uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,app,dev]"
 sudo apt install espeak-ng      # Linux only: the built-in reader voice (macOS has `say`)
 ```
 
@@ -28,7 +32,7 @@ Windows (Command Prompt or PowerShell, from the repository folder):
 ```bat
 uv venv
 .venv\Scripts\activate
-uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,dev]"
+uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,app,dev]"
 ```
 
 In PowerShell the activate line is `.venv\Scripts\Activate.ps1`. Windows reads aloud with its own SAPI
@@ -52,11 +56,13 @@ Two things that cost an afternoon if you do not know them:
 | `cc` | Claude Code cannot be driven at all |
 | `voice` | no microphone — `numpy`, `sounddevice`, `soxr` |
 | `live` | no voice — Gemini Live is the conversational half |
-| `tts` | one fewer reader voice (Microsoft's, over the network). Not required: the OS voice reads exact text with nothing installed |
+| `tts` | one fewer reader voice (Microsoft's, over the network). Not required: the OS voice reads exact text with nothing installed. Includes `miniaudio`, which decodes that voice where there is no ffmpeg (every Windows) |
 | `geo` | no GeoLite2 lookup, so "where am I" needs `[location] city` in config.toml |
 | `wake` | no wake word; the desk refuses to start unless `voice.wake_word = ""` (always listening) |
 | `secrets` | credentials fall back to environment variables |
 | `aec` | open speakers cannot barge in; a headset still works |
+| `app` | no tray icon by the clock (`pystray`, `pillow`); the app still runs and the window's Quit still ends it |
+| `build` | only for building `Jarvis.exe` yourself (`pyinstaller`); see [the app guide](app.md#for-developers) |
 
 Two things are NOT pip packages and `doctor` checks both:
 
@@ -157,6 +163,21 @@ caller between two processes, not a missing feature:
   The gate publishes an event nothing listens for.
 - **The desk does not run the builder itself** — after speaking a build request, run
   `python -m jarvis build` to carry it forward.
+
+## The app: everything at once
+
+```bash
+python -m jarvis                 # no subcommand: the app (window, desk, scheduler, Telegram)
+```
+
+On Windows the install line also makes `.venv\Scripts\Jarvis.exe`, which starts the same app with no
+console window at all; double-click it, or send a shortcut to the desktop. The app supervises the desk,
+the scheduler and the Telegram bot as child processes, restarts one that crashes, holds one that refused
+to start (and shows why in the window, with a button that fixes it), and sits by the clock as a tray icon.
+Its logs are in `%LOCALAPPDATA%\Jarvis\logs` (`~/.local/state/jarvis/logs` elsewhere). The built,
+double-clickable `Jarvis.exe` and everything about using it are in [the app guide](app.md).
+
+The commands below still run each process on its own, which is how to watch one start.
 
 ## The window
 

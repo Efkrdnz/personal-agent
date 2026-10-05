@@ -32,6 +32,9 @@ __pycache__/
 .eggs/
 build/
 dist/
+# What the Windows app workflow leaves behind when it is run by hand.
+ci-logs/
+Jarvis-Windows-*.zip
 .venv/
 venv/
 .pytest_cache/

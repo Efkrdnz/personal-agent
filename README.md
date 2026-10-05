@@ -3,7 +3,9 @@
 A voice-first personal assistant that drives Claude Code by voice, holds Claude Code's plan-mode
 question-and-answer as a spoken conversation, and picks up the phone when you're not at the desk.
 
-**Status: planned, not built.** This repository currently contains the plan. No runtime code yet.
+**Using it on Windows?** [Download the app](docs/app.md), unzip it, and double-click `Jarvis.exe`:
+setup happens in Jarvis's own window, with no terminal. Working on the code instead:
+[`docs/setup.md`](docs/setup.md).
 
 ---
 
@@ -26,6 +28,8 @@ it spent.
 
 | Document | What it's for |
 |---|---|
+| [`docs/app.md`](docs/app.md) | **Using Jarvis on Windows**: download, double-click, the first-run screens, updating |
+| [`docs/setup.md`](docs/setup.md) | Running it from a source checkout, every credential, every command |
 | [`docs/findings.md`](docs/findings.md) | What was actually established, and what was refuted. **Read this before disagreeing with the architecture.** |
 | [`docs/architecture.md`](docs/architecture.md) | The design: components, data model, the bus, the Claude Code driver, voice fidelity, the audio graph, presence |
 | [`docs/roadmap.md`](docs/roadmap.md) | Nine spikes, then eight stages, ~13 weeks. Open decisions and honest risks |

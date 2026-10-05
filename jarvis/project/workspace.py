@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -161,6 +162,9 @@ class SubprocessGit:
                 errors="replace",
                 timeout=timeout if timeout is not None else self.timeout_s,
                 check=False,
+                # CREATE_NO_WINDOW: from the windowed app, git.exe would
+                # otherwise flash a console window of its own on every call.
+                creationflags=0x08000000 if sys.platform == "win32" else 0,
             )
         except subprocess.TimeoutExpired:
             return GitResult(code=124, err="git timed out")

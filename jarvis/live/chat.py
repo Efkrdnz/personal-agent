@@ -27,32 +27,21 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from jarvis.live.persona import DEFAULT_ADDRESS, text_instruction
 from jarvis.live.text import TEXT_MODEL, TextCallFailed
 
 __all__ = ["PERSONA", "ChatTurn", "GeminiChat", "persona"]
 
-#: Who Jarvis is, in any channel that is not a phone call to a third party.
-#: General first: the build console is one of the things it does, not the
-#: thing it is.
-PERSONA = "\n".join(
-    (
-        "You are Jarvis, the user's personal assistant. You are general-purpose: answer",
-        "questions, give the weather and the time anywhere, remember things the user tells",
-        "you, set reminders, look things up on the web, and drive Claude Code to build",
-        "software when asked.",
-        "Be brief and concrete. Prefer one good answer to a list of options.",
-        "Use a tool whenever one fits rather than guessing: weather for weather, local_time",
-        "for times, web_search for anything current or that you are unsure of, recall when",
-        "the user refers to something they told you before.",
-        "Never invent the result of a tool, a time you did not get from a tool, or a fact",
-        "about the user that is not in your notes.",
-    )
-)
+#: Who Jarvis is, in any channel that is not a phone call to a third party,
+#: with the default address. General first: the build console is one of the
+#: things it does, not the thing it is. The words live in jarvis.live.persona,
+#: so the text chat and the voice cannot drift into two different characters.
+PERSONA = text_instruction()
 
 
-def persona(*, extra: str = "") -> str:
-    """The persona, plus anything channel- or user-specific (their notes, say)."""
-    return "\n\n".join(x for x in (PERSONA, extra) if x)
+def persona(extra: str = "", *, address: str = DEFAULT_ADDRESS, name: str = "") -> str:
+    """The persona for this user, plus anything channel- or user-specific (their notes, say)."""
+    return "\n\n".join(x for x in (text_instruction(address, name), extra) if x)
 
 
 @dataclass(frozen=True, slots=True)
