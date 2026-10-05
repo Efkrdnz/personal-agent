@@ -25,7 +25,14 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["TEXT_MODEL", "GeminiArbiter", "GeminiSearch", "GeminiText", "TextCallFailed"]
+__all__ = [
+    "TEXT_MODEL",
+    "GeminiArbiter",
+    "GeminiSearch",
+    "GeminiText",
+    "GeminiVision",
+    "TextCallFailed",
+]
 
 #: The text model for tidying. Deliberately NOT ``jarvis.live.MODEL``: that is the
 #: LIVE model, a duplex audio endpoint, and asking it for a JSON document is
@@ -94,19 +101,75 @@ class GeminiText:
             reply = client.models.generate_content(model=self.model, contents=prompt, config=config)
         except Exception as exc:  # noqa: BLE001 - every SDK failure is one thing to the caller
             raise TextCallFailed(f"{type(exc).__name__}: {exc}") from exc
+        return _text_of(reply)
 
-        text = getattr(reply, "text", None)
-        if not text or not str(text).strip():
-            # A blocked or empty response has a `text` of None and the reason
-            # buried in candidates[0].finish_reason. Saying "the model returned
-            # nothing" without that reason costs an afternoon.
-            reason = ""
-            for candidate in getattr(reply, "candidates", None) or ():
-                if finish := getattr(candidate, "finish_reason", None):
-                    reason = f" (finish_reason={getattr(finish, 'name', finish)})"
-                    break
-            raise TextCallFailed(f"the model returned no text{reason}")
-        return str(text)
+
+def _text_of(reply: Any) -> str:
+    """The reply's text, or :class:`TextCallFailed` saying why there is none."""
+    text = getattr(reply, "text", None)
+    if not text or not str(text).strip():
+        # A blocked or empty response has a `text` of None and the reason
+        # buried in candidates[0].finish_reason. Saying "the model returned
+        # nothing" without that reason costs an afternoon.
+        reason = ""
+        for candidate in getattr(reply, "candidates", None) or ():
+            if finish := getattr(candidate, "finish_reason", None):
+                reason = f" (finish_reason={getattr(finish, 'name', finish)})"
+                break
+        raise TextCallFailed(f"the model returned no text{reason}")
+    return str(text)
+
+
+@dataclass
+class GeminiVision:
+    """``(image, prompt) -> str``: one picture and one question, one answer.
+
+    What :class:`jarvis.capture.look.Eyes` asks through. A one-shot
+    ``generate_content`` rather than a frame pushed into the Live session: it
+    works in the text chats too, its answer can be redacted before anybody
+    hears it, and nothing stays in a conversation's context to be billed again
+    every turn. One extra round trip, only when the user asked to be looked at.
+
+    READ FROM THE SDK, NOT MEASURED: ``Part.from_bytes`` and a ``[part, text]``
+    contents list are google-genai 2.23.0's documented image input; whether
+    ``voice.text_model`` accepts images has not been tried with a billed call.
+    ``media_resolution`` is left to the server unless set, because the per-part
+    levels are newer than some models and an unknown one fails the whole call.
+    """
+
+    api_key: str
+    model: str = TEXT_MODEL
+    #: Low: this describes what is there, and a creative description of a
+    #: screen is a wrong one.
+    temperature: float = 0.2
+    media_resolution: str | None = None
+    client: Any | None = field(default=None, repr=False)
+
+    def __call__(self, image: bytes, prompt: str, *, mime_type: str = "image/png") -> str:
+        client = self.client
+        if client is None:
+            if not self.api_key:
+                raise TextCallFailed("no Gemini credential: pass GeminiVision(api_key=...)")
+            try:
+                from google import genai
+            except ImportError as exc:  # pragma: no cover - the extra is installed in CI
+                raise TextCallFailed(
+                    'google-genai is not installed: pip install -e ".[live]"'
+                ) from exc
+            client = genai.Client(api_key=self.api_key)
+        try:
+            from google.genai import types as t
+
+            extra = {"media_resolution": self.media_resolution} if self.media_resolution else {}
+            part = t.Part.from_bytes(data=image, mime_type=mime_type, **extra)
+            reply = client.models.generate_content(
+                model=self.model,
+                contents=[part, prompt],
+                config={"temperature": self.temperature},
+            )
+        except Exception as exc:  # noqa: BLE001 - every SDK failure is one thing to the caller
+            raise TextCallFailed(f"{type(exc).__name__}: {exc}") from exc
+        return _text_of(reply)
 
 
 @dataclass

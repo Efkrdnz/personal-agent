@@ -45,8 +45,13 @@ heuristic and it is labelled as one; the real API (``CGPreflightScreenCaptureAcc
 is not reachable from the standard library, and adding a compiled dependency to
 ask a yes/no question is not a trade this package makes.
 
-Windows — generally fine. PowerShell plus ``System.Drawing`` copies the virtual
-screen into a bitmap and saves PNG, with no permission model in the way.
+Windows — no permission model in the way, and no external program either:
+:class:`jarvis.capture.windows.GdiCapturer` copies the screen through GDI with
+ctypes. It replaced a PowerShell + ``System.Drawing`` row in the table below,
+which flashed a console window over the very screen it was photographing (the
+app is windowed, so every console program it starts gets a window of its own),
+wrote the picture to a temp file, and spliced that file's path into a quoted
+PowerShell string a profile named ``O'Brien`` would break.
 
 EVERY REAL BACKEND IS UNTESTABLE HERE, and that is a design input rather than an
 excuse. This machine has no display at all, and CI never will. So the platform
@@ -142,22 +147,6 @@ CAPTURE_TOOLS: tuple[Tool, ...] = (
         ("screencapture", "-x", "-t", "png", "-l", "{window}", "{out}"),
         platforms=("darwin",),
         session="quartz",
-    ),
-    Tool(
-        "powershell",
-        (
-            "powershell",
-            "-NoProfile",
-            "-Command",
-            "Add-Type -AssemblyName System.Drawing,System.Windows.Forms; "
-            "$b=[System.Windows.Forms.SystemInformation]::VirtualScreen; "
-            "$i=New-Object System.Drawing.Bitmap $b.Width,$b.Height; "
-            "$g=[System.Drawing.Graphics]::FromImage($i); "
-            "$g.CopyFromScreen($b.Location,[System.Drawing.Point]::Empty,$b.Size); "
-            "$i.Save('{out}',[System.Drawing.Imaging.ImageFormat]::Png)",
-        ),
-        platforms=("win32",),
-        session="gdi",
     ),
 )
 
@@ -383,6 +372,9 @@ def _run_capture(argv: Sequence[str], out: Path) -> None:
         capture_output=True,
         timeout=CAPTURE_TIMEOUT_S,
         check=False,
+        # No row in CAPTURE_TOOLS targets Windows any more; hidden anyway, so a
+        # row added later cannot flash a console from the windowed app.
+        creationflags=0x08000000 if sys.platform == "win32" else 0,
     )
     if proc.returncode != 0:
         raise RuntimeError(
@@ -429,17 +421,9 @@ def detect_backend(
         )
 
     if plat == "win32":
-        if look("powershell") is None:
-            return BackendStatus(
-                "powershell",
-                available=False,
-                refusal=Refusal(
-                    code="no_backend",
-                    detail="powershell is not on PATH",
-                    remedy="check PATH",
-                ),
-            )
-        return BackendStatus("powershell", available=True)
+        # GDI is part of every Windows desktop; whether there is a screen to
+        # copy (a locked session, a service account) is found out by trying.
+        return BackendStatus("gdi", available=True, note="ctypes GDI; no subprocess")
 
     wayland = bool(environ.get("WAYLAND_DISPLAY")) or environ.get("XDG_SESSION_TYPE") == "wayland"
     if wayland:
@@ -499,6 +483,11 @@ def choose_capturer(
     status = detect_backend(platform=platform, env=env, which=which)
     if not status.available:
         return NullCapturer(status.refusal)
+    if status.name == "gdi":
+        # Imported here: the GDI module imports this one for BackendStatus.
+        from jarvis.capture.windows import GdiCapturer
+
+        return GdiCapturer()
     tool = next((t for t in CAPTURE_TOOLS if t.name == status.name), None)
     if tool is None:  # pragma: no cover - only reachable if the table and detect disagree
         return NullCapturer(

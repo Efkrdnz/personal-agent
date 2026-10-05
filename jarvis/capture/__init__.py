@@ -11,6 +11,10 @@ answered in:
               carries a warning band saying so.
 ``service``   Do it, record it in the effects ledger, and hand back bytes.
 
+``look`` is the other consumer: one picture sent to a MODEL to answer one
+question about the screen, recorded before it leaves and never kept. On Windows
+the picture comes from ``windows`` (GDI through ctypes, no subprocess).
+
 The delivery contract is :class:`Artifact`: bytes, a filename, a media kind. This
 package does not know whether that goes to Telegram, to a phone leg or to a local
 HUD, and must not learn — ``jarvis.telegram`` is deliberately not imported here.
@@ -43,6 +47,17 @@ from jarvis.capture.backends import (
     choose_capturer,
     detect_backend,
 )
+from jarvis.capture.look import (
+    MAX_SIDE,
+    VISION_KIND,
+    VISION_POLICY,
+    Eyes,
+    Focus,
+    Focuser,
+    Look,
+    LookFailed,
+    look,
+)
 from jarvis.capture.png import Box, Canvas, RawImage, UnsupportedPNG, decode_png, encode_png
 from jarvis.capture.policy import DEFAULT_FORBIDDEN, CapturePolicy, Window, text_only_policy
 from jarvis.capture.redact import (
@@ -64,15 +79,19 @@ from jarvis.capture.service import (
     record_capture,
     render_transcript,
 )
+from jarvis.capture.windows import GdiCapturer
 
 __all__ = [
     "CAPTURE_REVERSIBILITY",
     "CAPTURE_TOOLS",
     "DEFAULT_FORBIDDEN",
+    "MAX_SIDE",
     "MEDIA_MIME",
     "PIXEL_WARNING",
     "REDACTION_FILL",
     "SECRET_SHAPES",
+    "VISION_KIND",
+    "VISION_POLICY",
     "WAYLAND_REFUSAL",
     "Artifact",
     "BackendStatus",
@@ -82,7 +101,13 @@ __all__ = [
     "CaptureRefused",
     "Capturer",
     "CommandCapturer",
+    "Eyes",
     "Finding",
+    "Focus",
+    "Focuser",
+    "GdiCapturer",
+    "Look",
+    "LookFailed",
     "MediaKind",
     "NullCapturer",
     "RawImage",
@@ -102,6 +127,7 @@ __all__ = [
     "decode_png",
     "detect_backend",
     "encode_png",
+    "look",
     "record_capture",
     "redact_pixels",
     "redact_text",
