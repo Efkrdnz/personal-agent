@@ -509,3 +509,28 @@ def test_the_setup_guide_sends_a_windows_user_to_the_app_first() -> None:
     app = (ROOT / "docs" / "app.md").read_text(encoding="utf-8")
     for must in ("Jarvis.exe", "More info", "Run anyway", "LOCALAPPDATA", "Jarvis-Windows-x64"):
         assert must in app, f"docs/app.md does not mention {must}"
+
+
+def test_past_ten_failures_every_one_still_gets_its_diagnosis(tmp_path: Path) -> None:
+    # A bare test name is not a diagnosis, and the run that failed thirty
+    # tests on Windows is exactly the one that must say why for each of them.
+    cases = "".join(
+        f'<testcase classname="tests.test_w" name="test_{i}">'
+        f'<failure message="AssertionError: case {i}">def test_{i}():\n'
+        f">       assert f() == {i}\nE       AssertionError: wanted {i}\n\n"
+        f"tests\\test_w.py:{i + 10}: AssertionError</failure></testcase>"
+        for i in range(31)
+    )
+    report = tmp_path / "pytest.xml"
+    report.write_text(
+        f'<?xml version="1.0"?><testsuites><testsuite>{cases}</testsuite></testsuites>',
+        encoding="utf-8",
+    )
+    a = _annotate()
+    out = a.junit(report)
+    assert len(out) <= a.MAX_PER_STEP
+    joined = "\n".join(out)
+    for i in range(31):
+        assert f"E       AssertionError: wanted {i}%0A" in joined or f"wanted {i}" in joined, i
+    assert "Not annotated" not in joined
+    assert all(len(line) < 4096 + 200 for line in out)

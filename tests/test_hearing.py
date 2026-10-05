@@ -304,7 +304,7 @@ def test_the_desk_is_wired_to_hear() -> None:
     desk actually calls them, because a corrector nobody hands to LiveTools is
     1,982 green tests and a deaf product.
     """
-    src = Path(cli.__file__).read_text()
+    src = Path(cli.__file__).read_text(encoding="utf-8")
     tree = ast.parse(src)
     desk = next(
         n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "_build_desk"

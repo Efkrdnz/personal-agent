@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import xml.etree.ElementTree as ET
 from collections.abc import Iterable
@@ -151,17 +152,65 @@ def failure(log_dir: Path) -> list[str]:
 
 
 def junit(xml_path: Path) -> list[str]:
-    """One ``::error`` per failed or erroring test in a pytest ``--junitxml`` report."""
+    """``::error`` lines for the failed and erroring tests in a pytest ``--junitxml`` report.
+
+    Up to ten failures, one annotation each with the end of its traceback.
+    Past ten, the ten-per-step limit would leave the rest as bare names, and
+    a name is not a diagnosis — so every failure is cut to its digest (the
+    ``E`` lines and where they were raised) and the digests are packed
+    several to an annotation.
+    """
     if not xml_path.is_file():
         return []
-    items: list[tuple[str, str]] = []
+    items: list[tuple[str, str, str]] = []
     for case in ET.parse(xml_path).getroot().iter("testcase"):
         for bad in (*case.findall("failure"), *case.findall("error")):
             where = ".".join(filter(None, (case.get("classname"), case.get("name"))))
             head = (bad.get("message") or "").strip()
-            body = tail(f"{head}\n\n{bad.text or ''}".strip(), lines=40)
-            items.append((f"{bad.tag}: {where}", body or bad.tag))
-    return _capped(items, "error", "failed tests")
+            items.append((f"{bad.tag}: {where}", head, bad.text or ""))
+    if len(items) <= MAX_PER_STEP:
+        return [
+            command("error", title, tail(f"{head}\n\n{text}".strip(), lines=40) or title)
+            for title, head, text in items
+        ]
+    return _packed([_digest(*item) for item in items], len(items))
+
+
+#: How much of one failure a packed annotation carries.
+_DIGEST_CHARS = 900
+_DIGEST_E_LINES = 8
+
+
+def _digest(title: str, head: str, text: str) -> str:
+    rows = text.replace("\r\n", "\n").split("\n")
+    errors = [r.rstrip() for r in rows if r.startswith("E ")][:_DIGEST_E_LINES]
+    # pytest's "path:line: ExceptionType" lines say where it was raised.
+    raised = [r.strip() for r in rows if re.match(r"^\S.*:\d+: \w", r)][-2:]
+    first = head.split("\n", 1)[0]
+    body = "\n".join([f"## {title}", first[:300], *errors, *raised])
+    return body if len(body) <= _DIGEST_CHARS else body[: _DIGEST_CHARS - 1] + "…"
+
+
+def _packed(digests: list[str], total: int) -> list[str]:
+    groups: list[list[str]] = [[]]
+    for d in digests:
+        if groups[-1] and len("\n\n".join([*groups[-1], d])) > MAX_CHARS:
+            groups.append([])
+        groups[-1].append(d)
+    if len(groups) > MAX_PER_STEP:
+        rest = [
+            d.split("\n", 1)[0].removeprefix("## ") for g in groups[MAX_PER_STEP - 1 :] for d in g
+        ]
+        groups = [*groups[: MAX_PER_STEP - 1], ["Not annotated (ten per step): " + ", ".join(rest)]]
+    out = []
+    shown = 0
+    for g in groups:
+        first = shown + 1
+        shown += len(g)
+        out.append(
+            command("error", f"failed tests {first}-{shown} of {total}", "\n\n".join(g)[:MAX_CHARS])
+        )
+    return out
 
 
 def report_chunks(obj: dict[str, Any], limit: int = MAX_CHARS) -> list[str]:

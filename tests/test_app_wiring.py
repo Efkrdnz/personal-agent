@@ -14,6 +14,7 @@ import ast
 import json
 import os
 import sqlite3
+import sys
 import threading
 from collections.abc import Iterator
 from dataclasses import replace
@@ -504,7 +505,9 @@ def test_the_settings_service_built_here_works(
     args = argparse.Namespace(config=None, db=str(dbpath))
     setup = cli._setup_service(Config(), args, s, sup.Control(s, threading.Event()))
     st = setup.status()
-    assert st["can"] == {"preview": True, "restart": True, "autostart": False, "claude": True}
+    # Start-with-Windows exists only on Windows; elsewhere the toggle is hidden.
+    autostart = sys.platform == "win32"
+    assert st["can"] == {"preview": True, "restart": True, "autostart": autostart, "claude": True}
     logins: list[Any] = []
     monkeypatch.setattr(adapters, "claude_login", lambda cli_path: logins.append(cli_path) or "ok")
     assert setup.sign_in_claude()["ok"] is True
@@ -695,8 +698,9 @@ def test_a_moved_app_repoints_its_run_key_at_startup(monkeypatch: pytest.MonkeyP
 
 
 def test_without_a_display_pystray_is_simply_absent() -> None:
-    # On this box `import pystray` raises an Xlib error, not ImportError.
-    if os.environ.get("DISPLAY"):
+    # On a headless Linux box `import pystray` raises an Xlib error, not
+    # ImportError. Windows and macOS always have a tray to draw in.
+    if sys.platform != "linux" or os.environ.get("DISPLAY"):
         pytest.skip("a display is present")
     assert tray.load_pystray() is None
 

@@ -242,9 +242,10 @@ def test_null_and_synthetic_satisfy_the_same_protocol_as_the_real_ones() -> None
 @pytest.mark.parametrize(("name", "expected_head"), [("grim", "grim"), ("maim", "maim")])
 def test_argv_templates_are_built_not_guessed(name: str, expected_head: str) -> None:
     tool = next(t for t in CAPTURE_TOOLS if t.name == name)
-    argv = tool.argv("screen", Path("/tmp/x/shot.png"), None)
+    out = Path("/tmp/x/shot.png")
+    argv = tool.argv("screen", out, None)
     assert argv[0] == expected_head
-    assert "/tmp/x/shot.png" in argv
+    assert str(out) in argv
 
 
 def test_a_tool_that_cannot_frame_one_window_says_so_instead_of_shooting_the_lot() -> None:

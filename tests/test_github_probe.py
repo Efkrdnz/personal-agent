@@ -136,7 +136,7 @@ def test_the_findings_can_be_written_out_for_the_record(tmp_path: Path) -> None:
     out = tmp_path / "s8.json"
     t = FakeTransport(login=OWNER, scopes=("repo",))
     assert probe.main(["--json", str(out)], transport=t) == probe.EXIT_OK
-    report = json.loads(out.read_text())
+    report = json.loads(out.read_text(encoding="utf-8"))
     assert report["capabilities"]["delete"] == "no"
     assert "delete" in report["spoken"]
 
@@ -183,7 +183,7 @@ def test_a_delete_capable_token_leaves_nothing_behind(
     )
     assert code == probe.EXIT_OK
     assert t.repos == {}
-    report = json.loads(out.read_text())["throwaway"]
+    report = json.loads(out.read_text(encoding="utf-8"))["throwaway"]
     assert report["delete"] == {"ok": True}
     assert "left_behind" not in report
     assert "nothing was left behind" in capsys.readouterr().out

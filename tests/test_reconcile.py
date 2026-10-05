@@ -27,6 +27,10 @@ from jarvis.db import connect, migrate
 from jarvis.ids import now
 from jarvis.jobs import shift_ts
 
+#: Without /proc a live pid is "unknown", never "alive" (jobs.process_liveness),
+#: so on Windows and macOS a running job is reported undetermined by design.
+NEEDS_PROC = pytest.mark.skipif(not jobs.have_proc(), reason="liveness proof needs /proc")
+
 # ───────────────────────────── fixtures ─────────────────────────────
 
 
@@ -182,6 +186,7 @@ def test_reconcile_is_idempotent_across_processes(db_path: Path) -> None:
     second.close()
 
 
+@NEEDS_PROC
 def test_a_live_runner_is_left_alone(con: sqlite3.Connection) -> None:
     job = live_job(con)
     report = reconcile.reconcile(con)
@@ -190,6 +195,7 @@ def test_a_live_runner_is_left_alone(con: sqlite3.Connection) -> None:
     assert jobs.get(con, job.id).state == "running"  # type: ignore[union-attr]
 
 
+@NEEDS_PROC
 def test_a_wedged_but_living_runner_is_reported_never_killed(con: sqlite3.Connection) -> None:
     """Going quiet during a long compile is not dying. Say it; do not act on it."""
     job = live_job(con)

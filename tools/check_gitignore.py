@@ -63,7 +63,7 @@ def main() -> int:
             failures.append(f"OVER-MATCHED: {rel} is ignored but must be committed")
 
     # And the mechanical cause, caught directly: a pattern with a trailing comment.
-    gi = (root / ".gitignore").read_text().splitlines()
+    gi = (root / ".gitignore").read_text(encoding="utf-8").splitlines()
     for n, line in enumerate(gi, 1):
         s = line.strip()
         if s and not s.startswith("#") and "#" in s:

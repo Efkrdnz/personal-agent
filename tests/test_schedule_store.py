@@ -492,6 +492,10 @@ def daemon_in(request: pytest.FixtureRequest) -> Iterator[None]:
     this module must never do is read them. The assertion is that the instants do
     not move at all.
     """
+    if not hasattr(time, "tzset"):
+        # Windows reads TZ once, at startup; nothing can move a running
+        # process's zone there, so there is no box zone to prove we ignore.
+        pytest.skip("time.tzset is POSIX-only")
     before = os.environ.get("TZ")
     os.environ["TZ"] = request.param
     time.tzset()

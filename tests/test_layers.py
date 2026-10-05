@@ -80,7 +80,9 @@ def test_a_docstring_naming_another_layer_is_not_a_violation() -> None:
     would then be deleted, which is how this class of check dies.
     """
     chunk = ROOT / "jarvis/voice/chunk.py"
-    assert "jarvis.answers" in chunk.read_text(), "the pointer to the spine's numbering is gone"
+    assert "jarvis.answers" in chunk.read_text(encoding="utf-8"), (
+        "the pointer to the spine's numbering is gone"
+    )
     assert not any(name.startswith("jarvis.cc") for name in imports_of(chunk))
 
 

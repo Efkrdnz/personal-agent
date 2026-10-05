@@ -40,7 +40,7 @@ def test_the_dry_run_answers_all_four_questions(capsys: pytest.CaptureFixture[st
 def test_the_dry_run_writes_its_report_where_it_is_told(tmp_path: Path) -> None:
     out = tmp_path / "s4" / "report.json"
     assert main(["--dry-run", "--out", str(out)]) == 0
-    assert json.loads(out.read_text())["probe"] == "S4"
+    assert json.loads(out.read_text(encoding="utf-8"))["probe"] == "S4"
 
 
 def test_with_no_key_it_refuses_cleanly_and_says_what_it_wants(

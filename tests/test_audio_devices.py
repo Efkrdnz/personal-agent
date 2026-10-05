@@ -50,6 +50,12 @@ class FakeProbe:
 
 def test_this_module_imports_without_portaudio() -> None:
     """The point of the lazy import, asserted rather than assumed."""
+    try:
+        import sounddevice  # noqa: F401
+    except (ImportError, OSError):
+        pass
+    else:
+        pytest.skip("PortAudio is installed here (the Windows wheel bundles it)")
     with pytest.raises(AudioStackMissing) as exc:
         PortAudioProbe().devices()
     assert "PortAudio" in str(exc.value) or "portaudio" in str(exc.value).lower()

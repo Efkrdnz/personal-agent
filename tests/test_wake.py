@@ -340,7 +340,7 @@ def test_a_wake_word_without_its_model_refuses_rather_than_listening_to_everythi
 
 def test_the_desk_builds_and_starts_the_watch() -> None:
     """The caller, not the callee: a WakeWatch nobody starts is a deaf desk."""
-    tree = ast.parse(Path(cli.__file__).read_text())
+    tree = ast.parse(Path(cli.__file__).read_text(encoding="utf-8"))
     fns = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
 
     def calls(fn: ast.FunctionDef) -> set[str]:

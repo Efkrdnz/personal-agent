@@ -531,7 +531,8 @@ def test_process_identity_records_all_four_columns() -> None:
     ident = jobs.process_identity()
     assert set(ident) == {"pid", "pgid", "boot_id", "proc_start_ticks"}
     assert ident["pid"] == os.getpid()
-    assert ident["pgid"] == os.getpgid(0)
+    # Windows has no process groups; the kill switch falls back to the pid.
+    assert ident["pgid"] == (os.getpgid(0) if hasattr(os, "getpgid") else None)
 
 
 @NEEDS_PROC

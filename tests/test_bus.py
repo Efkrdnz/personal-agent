@@ -13,6 +13,7 @@ they share an address space.
 from __future__ import annotations
 
 import json
+import socket
 import sqlite3
 import threading
 import time
@@ -35,6 +36,22 @@ from jarvis.bus import (
     verify_chain,
 )
 from jarvis.ids import canon, now, parse_ts
+
+
+def _can_poke() -> bool:
+    if not hasattr(socket, "AF_UNIX"):
+        return False
+    try:
+        socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM).close()
+    except OSError:
+        return False
+    return True
+
+
+#: Pokes are AF_UNIX datagrams, which Windows does not have. There the peer
+#: never binds, and the 250 ms poll is the whole contract — which the tests
+#: without this marker already hold it to.
+NEEDS_POKES = pytest.mark.skipif(not _can_poke(), reason="no AF_UNIX datagrams on this OS")
 
 CAPS: dict[str, Any] = {
     "human": True,
@@ -631,6 +648,7 @@ def test_publish_leaves_no_transaction_open_on_the_happy_path(con: sqlite3.Conne
     assert not con.in_transaction
 
 
+@NEEDS_POKES
 def test_a_nested_publish_sends_no_datagram_under_the_write_lock(
     con: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -677,6 +695,7 @@ def test_an_event_published_inside_a_transaction_is_still_delivered(
 # ───────────────────────── the poke socket, which is optional ─────────────────────────
 
 
+@NEEDS_POKES
 def test_losing_every_poke_changes_nothing_but_timing(con: sqlite3.Connection) -> None:
     """The stated cost of total poke loss is 250ms of latency and nothing else."""
     heard = Peer.attach(con, "heard", "desk", CAPS)
@@ -706,6 +725,7 @@ def test_losing_every_poke_changes_nothing_but_timing(con: sqlite3.Connection) -
     deaf.detach(con)
 
 
+@NEEDS_POKES
 def test_a_poke_wakes_a_peer_well_inside_the_poll_floor(con: sqlite3.Connection) -> None:
     peer = Peer.attach(con, "desk", "desk", CAPS)
     for _ in range(4):
@@ -738,6 +758,7 @@ def test_poking_a_dead_address_is_silent(con: sqlite3.Connection, tmp_path: Path
     assert bus.poke_attached(con) == 0
 
 
+@NEEDS_POKES
 def test_publish_succeeds_when_the_whole_poke_directory_is_gone(
     con: sqlite3.Connection, tmp_path: Path
 ) -> None:
@@ -768,6 +789,7 @@ def test_a_peer_that_cannot_bind_at_all_still_works_by_polling(
     peer.detach(con)
 
 
+@NEEDS_POKES
 def test_a_socket_left_behind_by_a_sigkilled_predecessor_does_not_block_reattach(
     con: sqlite3.Connection, tmp_path: Path
 ) -> None:
@@ -810,6 +832,7 @@ def test_attachment_is_durable_and_visible_to_a_later_process(db_path: Path) -> 
     b.close()
 
 
+@NEEDS_POKES
 def test_detach_is_recorded_and_stops_the_pokes(db_path: Path) -> None:
     a = db.connect(db_path)
     peer = Peer.attach(a, "desk", "desk", CAPS)
@@ -844,6 +867,7 @@ def test_reattaching_clears_a_previous_detach(con: sqlite3.Connection) -> None:
     assert row["state"] == "attached" and row["detached_at"] is None
 
 
+@NEEDS_POKES
 def test_a_predecessor_exiting_cannot_unlink_its_successors_socket(
     con: sqlite3.Connection,
 ) -> None:

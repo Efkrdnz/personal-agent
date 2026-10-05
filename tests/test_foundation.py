@@ -125,7 +125,9 @@ def test_a_database_built_before_a_migration_existed_upgrades_and_keeps_its_data
     """
     early = tmp_path / "early"
     early.mkdir()
-    (early / "001_init.sql").write_text((db.MIGRATIONS_DIR / "001_init.sql").read_text())
+    (early / "001_init.sql").write_text(
+        (db.MIGRATIONS_DIR / "001_init.sql").read_text(encoding="utf-8"), encoding="utf-8"
+    )
 
     con = db.connect(dbfile)
     assert db.migrate(con, migrations_dir=early) == 1
@@ -271,7 +273,7 @@ def test_migration_contains_no_connection_scoped_pragmas() -> None:
     # If a PRAGMA foreign_keys line reappears in a migration, someone has
     # reintroduced the bug where it silently applies to exactly one connection.
     for f in db.MIGRATIONS_DIR.glob("*.sql"):
-        for line in f.read_text().splitlines():
+        for line in f.read_text(encoding="utf-8").splitlines():
             stripped = line.strip()
             if stripped.startswith("--"):
                 continue

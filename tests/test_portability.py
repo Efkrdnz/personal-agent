@@ -22,9 +22,12 @@ def test_poke_paths_need_no_getuid(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     monkeypatch.delattr(os, "getuid", raising=False)
     monkeypatch.delenv("JARVIS_POKE_DIR", raising=False)
     monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
-    monkeypatch.setattr("tempfile.gettempdir", lambda: str(tmp_path))
+    # A short temp dir: a socket path past sun_path's 108 bytes is renamed to
+    # a hash, and a CI runner's own temp dir is long enough to trigger that.
+    short = Path(tmp_path.anchor) / "t"
+    monkeypatch.setattr("tempfile.gettempdir", lambda: str(short))
     d = bus.poke_dir()
-    assert d.parent.name.startswith("jarvis-") and d.parent.parent == tmp_path
+    assert d.parent.name.startswith("jarvis-") and d.parent.parent == short
     assert bus.poke_path("peer").name == "peer.sock"
     assert bus.poke_path("x" * 300).name.startswith("jarvis-")
 
