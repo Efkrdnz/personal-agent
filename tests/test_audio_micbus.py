@@ -86,6 +86,9 @@ def test_the_writer_never_waits_for_a_reader() -> None:
     """
     bus = MicBus(rate=1000, seconds=0.5)  # 500-sample ring
     parked = bus.reader("parked")
+    # The parked reader may be scheduled after the FIRST write and keep up, as
+    # it does on Windows; this one cannot, because it reads only afterwards.
+    late = bus.reader("late")
     started = threading.Event()
     result: dict[str, object] = {}
 
@@ -108,7 +111,8 @@ def test_the_writer_never_waits_for_a_reader() -> None:
     # 20 writes of a 500-sample ring, with a reader parked the whole time.
     assert elapsed < 0.5, f"the writer waited {elapsed:.3f}s on a reader"
     assert result["pcm"] is not None
-    assert parked.dropped > 0
+    assert late.read(400, timeout=0.5) is not None
+    assert late.dropped > 0
 
 
 def test_a_timed_out_read_still_reports_the_lag() -> None:
