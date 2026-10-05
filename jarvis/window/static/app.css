@@ -1235,6 +1235,15 @@ code {
   white-space: normal;
 }
 
+/* A command and what it printed keep their lines: the user is approving what
+   will run, and two statements on one line read as one command. These are
+   app.js's VERBATIM_KINDS. */
+.msg[data-kind="confirm.proposed"] .msg-text,
+.msg[data-kind="shell.started"] .msg-text,
+.msg[data-kind="shell.finished"] .msg-text {
+  white-space: pre-wrap;
+}
+
 .msg-tool .msg-text {
   color: var(--dim);
 }

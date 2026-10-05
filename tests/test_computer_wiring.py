@@ -294,3 +294,36 @@ def test_the_window_never_cleans_a_command_out_of_its_own_read_back() -> None:
     for kind in ("confirm.proposed", "shell.started", "shell.finished"):
         assert f'"{kind}"' in js, kind
     assert "VERBATIM_KINDS.has(" in js
+
+
+def test_the_feed_keeps_a_commands_lines_and_all_of_it(con: sqlite3.Connection) -> None:
+    import re
+
+    from jarvis.shell import command as sh
+    from jarvis.tools.confirm import Confirmations, TypedTurns
+    from jarvis.tools.ctx import ToolCtx
+    from jarvis.tools.default import registry
+    from jarvis.window import snapshot
+
+    css = (ROOT / "jarvis/window/static/app.css").read_text(encoding="utf-8")
+    js = (ROOT / "jarvis/window/static/app.js").read_text(encoding="utf-8")
+    kinds = re.search(r"VERBATIM_KINDS = new Set\(\[([^\]]*)\]", js)
+    assert kinds is not None
+    for kind in re.findall(r'"([^"]+)"', kinds.group(1)):
+        # Later and more specific than the system/tool rule that folds whitespace.
+        rule = f'.msg[data-kind="{kind}"] .msg-text'
+        assert rule in css, kind
+        assert css.index(rule) > css.index(".msg-tool .msg-text {"), kind
+        assert kind in snapshot._VERBATIM_KINDS, kind
+    tail = "Remove-Item C:\\Users\\me\\Documents\\Important"
+    body = "\n".join([f"Write-Output 'line {i} ' + 'x' * 80" for i in range(30)] + [tail])
+    body = body[: sh.MAX_CHARS - len(tail) - 1].rsplit("\n", 1)[0] + "\n" + tail
+    assert len(body) <= sh.MAX_CHARS
+    turns = TypedTurns()
+    extra = {**turns.keys(Confirmations())}
+    ctx = ToolCtx(con=con, channel="cli", actor="cli", extra=extra)
+    registry().dispatch("run_command", {"command": body}, ctx)
+    proposed = [
+        i for i in snapshot.feed(con, after=0, limit=50)["items"] if "asked before" in i["text"]
+    ]
+    assert proposed and proposed[-1]["text"].endswith(tail), "the end of the command was cut"

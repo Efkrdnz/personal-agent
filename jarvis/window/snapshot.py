@@ -94,6 +94,8 @@ _LOOKBACK = 500
 # a pasted novel must not become a megabyte of DOM.
 _MAX_LINE = 4000
 _MAX_BUBBLE = 20000
+#: Rows whose text IS a command or its output, never cut at _MAX_LINE.
+_VERBATIM_KINDS = frozenset({"confirm.proposed", "shell.started", "shell.finished"})
 
 _ROW_COLS = "seq, ts, kind, actor, payload, request_id"
 
@@ -526,7 +528,10 @@ def _render(con: sqlite3.Connection, row: sqlite3.Row) -> Shown:
     text = text.strip()
     if not text:
         return None
-    return role, text if len(text) <= _MAX_LINE else text[: _MAX_LINE - 1] + "…"
+    # The read-back and the run show the exact command, which run_command has
+    # already bounded; the voice sends the user here to read all of it.
+    cap = _MAX_BUBBLE if row["kind"] in _VERBATIM_KINDS else _MAX_LINE
+    return role, text if len(text) <= cap else text[: cap - 1] + "…"
 
 
 def _s(body: Mapping[str, Any], key: str) -> str:
