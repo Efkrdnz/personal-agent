@@ -781,7 +781,11 @@ def test_tool_reaches_the_registry_as_cli_and_window(
     assert r.body == {"ok": True, "said": "probed abc"}
     [ctx] = fakes.tool_calls
     assert (ctx.channel, ctx.actor) == ("cli", "window")
-    assert ctx.extra == EXTRA
+    from jarvis.tools.confirm import CONFIRMATIONS, DIRECT_HUMAN
+
+    # The press of Run is the yes a confirming tool asks for; the rest is EXTRA.
+    assert ctx.extra[DIRECT_HUMAN] is True and CONFIRMATIONS in ctx.extra
+    assert {k: v for k, v in ctx.extra.items() if k not in (CONFIRMATIONS, DIRECT_HUMAN)} == EXTRA
     [used] = _events(dbpath, "tool.used")
     assert used["actor"] == "window"
     assert json.loads(used["payload"])["channel"] == "cli"

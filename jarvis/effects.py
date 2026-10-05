@@ -152,6 +152,22 @@ KIND_REVERSIBILITY: dict[str, Reversibility] = {
     "telegram.send": "compensatable",
     "telegram.send_document": "compensatable",
     "phone.call": "irreversible",
+    # This computer, by voice. Opening something, a volume or media key and a
+    # lock are undone by the opposite action, or by the user signing back in.
+    "pc.open": "reversible",
+    "pc.volume": "reversible",
+    "pc.media": "reversible",
+    "pc.lock": "reversible",
+    # Reopened is not restored: whatever was unsaved in the window is gone.
+    "pc.app_close": "compensatable",
+    # Callable off only inside the grace period; after it, what was open is gone.
+    "pc.power": "compensatable",
+    # Jarvis is deaf until the machine wakes, so nothing can be said about it.
+    "pc.sleep": "compensatable",
+    # Nothing can say what a command changed, so nothing can say how to undo it.
+    "shell.run": "irreversible",
+    # The picture has left the machine.
+    "capture.vision": "irreversible",
 }
 
 #: Spoken as part of the refusal, so the user hears WHY rather than a flat no.
@@ -160,6 +176,8 @@ IRREVERSIBILITY_REASONS: dict[str, str] = {
     "github.repo_create": "the GitHub token deliberately has no delete_repo scope",
     "git.push_force": "the old history is already gone from anyone who pulled it",
     "phone.call": "the call already happened",
+    "shell.run": "a command can change anything, and I have no record of what it changed",
+    "capture.vision": "the picture has already gone to Google to be read",
 }
 
 #: Telegram lets a bot delete its own message for 48 hours and not one second

@@ -137,11 +137,17 @@ class GeminiChat:
             for call in calls:
                 args = dict(call.args or {})
                 said = self.dispatch(call.name, args)
-                used.append((call.name, said))
+                used.append((call.name, str(said)))
+                response: dict[str, Any] = {"result": str(said)}
+                # A Reply's detail is what the model answers from (a command's
+                # output, what is on the screen); the result is only its summary.
+                detail = getattr(said, "detail", "")
+                if detail:
+                    response["detail"] = detail
                 responses.append(
                     t.Part(
                         function_response=t.FunctionResponse(
-                            id=call.id, name=call.name, response={"result": said}
+                            id=call.id, name=call.name, response=response
                         )
                     )
                 )

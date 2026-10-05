@@ -690,6 +690,9 @@ def tool_extra(cfg: cfgmod.Config, api_key: str | None = None) -> dict[str, Any]
         "locator": locator_for(cfg),
         "units": cfg.location.units,
         "tz": cfg.tz,
+        # What a tool writes to the log or says may carry a secret it read (a
+        # command's output, an answer about the screen): scrubbed with this.
+        "redactor": desk_redactor(),
     }
     if api_key and cfg.voice.web_search and _installed("google.genai"):
         from jarvis.live.text import GeminiSearch
@@ -1161,6 +1164,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     from jarvis.live.chat import GeminiChat, persona
     from jarvis.live.text import TextCallFailed
+    from jarvis.tools.confirm import Confirmations, TypedTurns
     from jarvis.tools.ctx import ToolCtx
     from jarvis.tools.default import registry
 
@@ -1176,7 +1180,13 @@ def cmd_chat(args: argparse.Namespace) -> int:
 
     con = db.open_db(args.db)
     reg = registry()
-    ctx = ToolCtx(con=con, channel="cli", actor="cli", extra=tool_extra(cfg, key))
+    typed = TypedTurns()
+    ctx = ToolCtx(
+        con=con,
+        channel="cli",
+        actor="cli",
+        extra={**tool_extra(cfg, key), **typed.keys(Confirmations())},
+    )
     chat = GeminiChat(
         api_key=key,
         model=cfg.voice.text_model,
@@ -1196,6 +1206,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
             print(f"{WARN}  no voice to speak with; `sudo apt install espeak-ng`", file=sys.stderr)
 
     def turn(text: str) -> int:
+        typed.said(text)
         try:
             out = chat.send(text)
         except TextCallFailed as exc:
@@ -1496,14 +1507,25 @@ def _window_chat(
         return None, 'Chat needs google-genai: uv pip install -e ".[live]"'
     from jarvis.live.chat import GeminiChat, persona
     from jarvis.live.text import TextCallFailed
+    from jarvis.tools.confirm import Confirmations, TypedTurns
     from jarvis.tools.ctx import ToolCtx
+
+    # One conversation, one set of pending "shall I?" proposals, answered by
+    # the next message the user types.
+    typed = TypedTurns()
+    confirmations = Confirmations()
 
     def dispatch(name: str, args_: dict[str, Any]) -> str:
         # Its own connection per call: the chat runs on whichever server thread
         # took the request, and a connection belongs to the thread that made it.
         con = db.connect(db_path)
         try:
-            ctx = ToolCtx(con=con, channel="cli", actor="window", extra=extra)
+            ctx = ToolCtx(
+                con=con,
+                channel="cli",
+                actor="window",
+                extra={**extra, **typed.keys(confirmations)},
+            )
             return reg.dispatch(name, args_, ctx)
         finally:
             con.close()
@@ -1522,6 +1544,7 @@ def _window_chat(
     )
 
     def send(text: str) -> tuple[str, tuple[tuple[str, str], ...]]:
+        typed.said(text)
         try:
             turn = chat.send(text)
         except TextCallFailed as exc:
@@ -1956,6 +1979,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     from jarvis.audio.turn import TurnController
     from jarvis.live.profiles import DESK, SessionProfile
     from jarvis.live.session import GenaiConnector, LiveSession, QueuedLiveEvents, QueuedUplink
+    from jarvis.tools.confirm import Confirmations
     from jarvis.tools.default import registry
     from jarvis.voice.desk import DeskPublisher, desk_state
     from jarvis.voice.router import TrackSink
@@ -2045,6 +2069,8 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
         extra=tool_extra(cfg, key),
         hearing=hearing_for(cfg, key),
+        # Without this no tool that needs a spoken yes can act at the desk.
+        confirmations=Confirmations(),
     )
     if profile.vocabulary:
         print(f"{OK}  listening for: {', '.join(profile.vocabulary[-6:])}")

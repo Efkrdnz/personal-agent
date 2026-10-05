@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from jarvis.bus import publish
+from jarvis.effects import reversibility_of
 from jarvis.tools.ctx import ToolCtx
 
 __all__ = [
@@ -91,6 +92,10 @@ class Tool:
     #: True when the work outlives the utterance. The handler must return fast
     #: with something worth hearing and leave a row behind for a real worker.
     long_running: bool = False
+    #: The effects-ledger kind this tool may cause (``"pc.open"``), or None when it
+    #: changes nothing outside Jarvis. Classified or refused at registration: see
+    #: :meth:`Registry.add`.
+    effect: str | None = None
 
     def declaration(self) -> dict[str, Any]:
         return {
@@ -119,6 +124,10 @@ class Registry:
         unknown = set(tool.channels) - set(ALL_CHANNELS)
         if unknown:
             raise ValueError(f"{tool.name}: unknown channels {sorted(unknown)}")
+        if tool.effect is not None:
+            # Raises for an unclassified kind: a tool may not change anything
+            # until somebody has written down what undoing it would cost.
+            reversibility_of(tool.effect)
         self._tools[tool.name] = tool
 
     def __contains__(self, name: object) -> bool:

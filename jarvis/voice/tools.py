@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import sqlite3
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -46,6 +47,7 @@ from jarvis.live.profiles import SessionProfile
 from jarvis.live.session import ToolCall, ToolResult
 from jarvis.tools.builtin.answer import OPEN_QUESTION
 from jarvis.tools.builtin.hearing import HEARD, TRANSCRIPT_RAW
+from jarvis.tools.confirm import CONFIRMATIONS, HEARD_SINCE, MARK, Confirmations
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Registry
 from jarvis.voice.router import Fidelity, NoReader, Utterance
@@ -81,14 +83,22 @@ class Transcript:
     window_s: float = TRANSCRIPT_WINDOW_S
     max_chars: int = 8000
     clock: Callable[[], float] = time.monotonic
+    #: Words heard this soon after a mark are not counted as an answer to what
+    #: was said at the mark: they are the tail of the request that caused it,
+    #: transcribed late. A read-back takes longer than this to say, so a real
+    #: answer always lands after it.
+    settle_s: float = 0.75
     _parts: deque[tuple[float, str]] = field(default_factory=deque, repr=False)
+    #: Appended to on the session's loop, read from tool worker threads.
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     def heard(self, fragment: str) -> None:
         """One input-transcription fragment. Called from the session's event loop."""
         if not fragment:
             return
-        self._parts.append((self.clock(), fragment))
-        self._trim()
+        with self._lock:
+            self._parts.append((self.clock(), fragment))
+            self._trim()
 
     def _trim(self) -> None:
         cutoff = self.clock() - self.window_s
@@ -99,12 +109,26 @@ class Transcript:
 
     def words(self) -> str:
         """The window as one string, whitespace folded. May be empty."""
-        self._trim()
-        return " ".join("".join(p for _, p in self._parts).split())
+        with self._lock:
+            self._trim()
+            return " ".join("".join(p for _, p in self._parts).split())
+
+    def mark(self) -> float:
+        """Now, as a position :meth:`since` understands. For "what did they say after I asked"."""
+        return self.clock()
+
+    def since(self, mark: Any) -> str:
+        """What the user said after ``mark`` (plus :attr:`settle_s`), whitespace folded."""
+        if not isinstance(mark, (int, float)):
+            return ""
+        after = float(mark) + self.settle_s
+        with self._lock:
+            return " ".join("".join(p for t, p in self._parts if t >= after).split())
 
     def clear(self) -> None:
         """Forget the window. Called once a request has consumed it."""
-        self._parts.clear()
+        with self._lock:
+            self._parts.clear()
 
     def __bool__(self) -> bool:
         return bool(self.words())
@@ -133,6 +157,9 @@ class LiveTools:
     #: :mod:`jarvis.hearing`. Takes the tool call's own connection, so a word
     #: taught one sentence ago is in force for this one.
     hearing: Callable[[sqlite3.Connection, str], Heard] | None = None
+    #: This conversation's pending "shall I?" proposals. None: no tool that needs
+    #: a yes can act here (see :mod:`jarvis.tools.confirm`).
+    confirmations: Confirmations | None = None
     calls: int = 0
 
     # ── the two permission tables ────────────────────────────────────────
@@ -160,9 +187,16 @@ class LiveTools:
     async def dispatch(self, call: ToolCall) -> ToolResult:
         self.calls += 1
         text = await asyncio.to_thread(self._run, call.name, dict(call.args))
-        spoken = await self._read_aloud(call.name, text)
+        # A Reply is data the model answers from in its own voice (command
+        # output, what is on the screen); everything else the reader says as is.
+        aloud = getattr(text, "aloud", True)
+        spoken = await self._read_aloud(call.name, text) if aloud else False
+        response: dict[str, Any] = {"said": str(text), "already_spoken": spoken}
+        detail = getattr(text, "detail", "")
+        if detail:
+            response["detail"] = detail
         return ToolResult(
-            response={"said": text, "already_spoken": spoken},
+            response=response,
             # SILENT when the reader said it: the model must KNOW the sentence so
             # "start it then" resolves, and must not say it again. WHEN_IDLE when
             # nobody else can speak, so the user is not left in silence.
@@ -194,6 +228,12 @@ class LiveTools:
             # What "the second one" refers to. Read fresh every call: the desk
             # may have read a newer question since the model decided to answer.
             extra[OPEN_QUESTION] = self.questions.current
+        if self.confirmations is not None and self.transcript is not None:
+            # Approval is read from the user's own words after the read-back,
+            # never from the model's arguments. No transcript, no yes.
+            extra[CONFIRMATIONS] = self.confirmations
+            extra[MARK] = self.transcript.mark
+            extra[HEARD_SINCE] = self.transcript.since
         return ToolCtx(con=con, channel=self.channel, actor=self.actor, extra=extra)
 
     async def _read_aloud(self, name: str, text: str) -> bool:

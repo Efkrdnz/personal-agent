@@ -64,6 +64,7 @@ from jarvis import kill
 from jarvis import requests as rq
 from jarvis.answers import build_answer
 from jarvis.bus import Redactor, last_seq, publish
+from jarvis.tools.confirm import CONFIRMATIONS, DIRECT_HUMAN, Confirmations
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Registry
 from jarvis.window import snapshot
@@ -702,7 +703,10 @@ class _Handler(BaseHTTPRequestHandler):
             # channel "cli": the window is a screen with a keyboard, which is the
             # capability the cli column already describes. dispatch never raises;
             # a refusal comes back as the sentence to show.
-            ctx = ToolCtx(con=con, channel="cli", actor="window", extra=dict(s.extra))
+            # A person pressed Run in the Tools tab: that press is the yes a
+            # tool that needs one asks for (jarvis.tools.confirm).
+            extra = {**dict(s.extra), CONFIRMATIONS: Confirmations(), DIRECT_HUMAN: True}
+            ctx = ToolCtx(con=con, channel="cli", actor="window", extra=extra)
             said = s.registry.dispatch(name.strip(), args, ctx)
         self._json(200, {"ok": True, "said": said})
 
