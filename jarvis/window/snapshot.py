@@ -687,6 +687,65 @@ def _command(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection)
     return "system", f"STOP — everything was told to stop ({origin})" if origin else "STOP"
 
 
+def _confirm(verb: str) -> _Renderer:
+    def render(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+        tool = _s(body, "tool") or "an action"
+        if verb == "proposed":
+            # run_command's read-back ends with the command, exactly: the long
+            # script the voice only summarised is shown here, and the read-back
+            # says so.
+            text = _s(body, "readback")
+            return "system", f"asked before {tool}: {text}" if text else f"asked before {tool}"
+        if verb == "granted":
+            return "system", f"you said yes: {tool}"
+        why = _s(body, "why")
+        return "system", f"not done: {tool}" + (f" ({why})" if why else "")
+
+    return render
+
+
+def _shell_started(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    command = _s(body, "command")
+    return "tool", f"running: {command}" if command else "running a command"
+
+
+def _shell_finished(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    said = _s(body, "said") or "the command ended"
+    output = _s(body, "output").strip()
+    return "tool", f"{said}\n{output}" if output else said
+
+
+#: Effects the user must always be able to see happened, whoever asked: a
+#: picture of their screen sent to be read, and a countdown to switching off.
+_SHOWN_EFFECTS = frozenset({"capture.vision", "pc.power"})
+
+
+def _effect(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    if _s(body, "kind") not in _SHOWN_EFFECTS:
+        return None
+    return "system", _s(body, "summary")
+
+
+def _pc_power(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    noun = "restart" if body.get("action") == "restart" else "shutdown"
+    outcome = _s(body, "outcome")
+    if outcome == "started":
+        return "system", f"{noun}: the minute is up; Windows is asking apps to close"
+    if outcome == "called_off":
+        return "system", f"{noun} called off"
+    if outcome == "failed":
+        why = plain_sentence(_s(body, "error"))
+        return "system", f"{noun} didn't start: {why}" if why else f"{noun} didn't start"
+    return None
+
+
+def _pc_sleep(body: Mapping[str, Any], row: sqlite3.Row, con: sqlite3.Connection) -> Shown:
+    if _s(body, "outcome") == "failed":
+        why = plain_sentence(_s(body, "error"))
+        return "system", f"sleep didn't happen: {why}" if why else "sleep didn't happen"
+    return "system", "going to sleep"
+
+
 _RENDERERS: Mapping[str, _Renderer] = {
     "live.input_transcript": _fragment("user"),
     "live.output_transcript": _fragment("jarvis"),
@@ -719,6 +778,14 @@ _RENDERERS: Mapping[str, _Renderer] = {
     "desk.refused": _desk_refused,
     "app.process_exited": _process_exited,
     "app.started": _notice("system", "Jarvis is online"),
+    "confirm.proposed": _confirm("proposed"),
+    "confirm.granted": _confirm("granted"),
+    "confirm.refused": _confirm("refused"),
+    "shell.started": _shell_started,
+    "shell.finished": _shell_finished,
+    "effect.recorded": _effect,
+    "pc.power": _pc_power,
+    "pc.sleep": _pc_sleep,
 }
 
 

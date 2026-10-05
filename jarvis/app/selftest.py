@@ -130,6 +130,11 @@ def checks(platform: str) -> tuple[Check, ...]:
         Check("time zones", _zones),
         Check("british voice", _edge, critical=False),
         Check("tray", _tray, critical=False),
+        Check("terminal commands", lambda: _shell(windows)),
+        # Non-critical: each depends on the machine as much as on the build.
+        Check("desktop control", lambda: _desktop_control(windows), critical=False),
+        Check("screen capture", lambda: _screen(windows), critical=False),
+        Check("claude code sign-in", _claude_signin, critical=False),
     )
 
 
@@ -157,6 +162,14 @@ _MODULES = (
     "jarvis.app.setup",
     "jarvis.app.adapters",
     "jarvis.app.tray",
+    "jarvis.pc.windows",
+    "jarvis.tools.builtin.pc",
+    "jarvis.shell.run",
+    "jarvis.cc.status",
+    "jarvis.capture.look",
+    "jarvis.capture.windows",
+    "jarvis.tools.builtin.computer",
+    "jarvis.tools.builtin.screen",
 )
 
 
@@ -366,3 +379,70 @@ def _tray() -> str:
         raise RuntimeError("pystray cannot run here; the app waits without a tray icon")
     icon_image(16)
     return "pystray imports and the icon draws"
+
+
+def _shell(windows: bool) -> str:
+    if not windows:
+        raise Skipped("Windows only")
+    from jarvis.shell import Shell
+
+    shell = Shell.here()
+    out = shell.run("Write-Output 'Jarvis ğ'", timeout_s=60)
+    said = shell.text(out).strip()
+    if out.exit_code != 0 or said != "Jarvis ğ":
+        raise RuntimeError(f"PowerShell said {said[:80]!r} (exit {out.exit_code}, {out.error})")
+    return f"{shell.spec.argv[0]}, UTF-8 round trip"
+
+
+def _desktop_control(windows: bool) -> str:
+    """The app catalog, a known folder and the volume, read the way the tools read them.
+
+    Nothing is opened, closed or changed. A frozen build missing ctypes' Windows
+    half or the PowerShell catalog fails here instead of at "open Spotify".
+    """
+    if not windows:
+        raise Skipped("Windows only")
+    from jarvis.pc.catalog import Match, match
+    from jarvis.pc.windows import WindowsDesktop
+
+    desk = WindowsDesktop()
+    scanned = [a for a in desk.apps() if a.source != "settings"]
+    if not scanned:
+        raise RuntimeError(f"no apps found: {desk.catalog.errors}")
+    docs = desk.known_folder("documents")
+    vol = desk.volume()
+    notepad = isinstance(match("notepad", scanned), Match) or isinstance(
+        match("not defteri", scanned), Match
+    )
+    return (
+        f"{len(scanned)} apps{'' if notepad else ' (no Notepad)'}; Documents at {docs}; "
+        f"volume {vol.level if vol else 'unreadable'}"
+        + (f"; unread: {', '.join(sorted(desk.catalog.errors))}" if desk.catalog.errors else "")
+    )
+
+
+def _screen(windows: bool) -> str:
+    # Metrics only: a self-test must not photograph whatever the user has open.
+    if not windows:
+        raise Skipped("Windows only")
+    from jarvis.capture.windows import Win32, per_monitor_dpi
+
+    api = Win32()
+    with per_monitor_dpi(api):
+        screen = api.virtual_screen()
+    if screen.width <= 0 or screen.height <= 0:
+        raise RuntimeError(f"no screen to capture: {screen}")
+    return f"{screen.width}x{screen.height} virtual screen, GDI"
+
+
+def _claude_signin() -> str:
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    from jarvis.cc.status import probe
+
+    cli = SubprocessCLITransport.__new__(SubprocessCLITransport)._find_bundled_cli()
+    facts = probe(str(cli) if cli else None, timeout_s=30)
+    if facts["logged_in"] is None:
+        # The ANSWER is unreadable. Signed out is a fine answer.
+        raise RuntimeError(facts["error"] or "unreadable")
+    return "signed in" if facts["logged_in"] else "installed, not signed in"

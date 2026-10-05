@@ -369,10 +369,17 @@ def test_the_cli_downloads_and_tests(
     files = fake_release()
     monkeypatch.setattr(wk, "MODELS", {n: wk._sha256(b) for n, b in files.items()})
     monkeypatch.setattr(wk, "_https_get", lambda url: files[url.rsplit("/", 1)[1]])
+    from jarvis.audio import vadmodel
+
+    # The voice detector rides along; offline, that is a warning and not a failure.
+    monkeypatch.setattr(
+        vadmodel, "_https_get", lambda url: (_ for _ in ()).throw(OSError("offline"))
+    )
     assert cli.main(["--db", str(tmp_path / "d.db"), "wake", "download"]) == 0
     out = capsys.readouterr().out
     assert "hey_jarvis_v0.1.onnx" in out
     assert "CC BY-NC-SA" in out  # the licence is said where the model arrives
+    assert "voice detector" in out and "basic one" in out
     monkeypatch.setattr(wk, "_https_get", lambda url: b"tampered")
     monkeypatch.setattr(wk, "MODELS", {n: "0" * 64 for n in files})
     assert cli.main(["--db", str(tmp_path / "d.db"), "wake", "download"]) == 1

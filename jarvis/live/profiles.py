@@ -274,6 +274,20 @@ DESK = SessionProfile(
         "list_reminders",
         "cancel_reminder",
         "web_search",
+        # This computer: only at the desk, never on the phone (it has no screen,
+        # and its caller is whoever knows the number).
+        "open_app",
+        "open_website",
+        "open_folder",
+        "close_app",
+        "volume",
+        "media",
+        "lock_screen",
+        "power",
+        "cancel_power",
+        "run_command",
+        "claude_code_status",
+        "look_at_screen",
     ),
 )
 

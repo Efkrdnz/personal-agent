@@ -103,6 +103,9 @@ jarvis/           the spine — one SQLite file, several processes, stdlib only
   config.py       settings that are not secrets, and a refusal if one appears
   liveness.py     which processes are running, as heartbeat rows in `cursors`
 jarvis/tools/     what a spoken sentence is allowed to make happen
+  confirm.py      read it back, then act only on the user's OWN yes (never the model's)
+jarvis/pc/        this computer: open, close, volume, media, lock, power (stdlib, ctypes on Windows)
+jarvis/shell/     how one command runs: hidden, bounded, secrets out, killed as a tree
 jarvis/window/    the HUD: a stdlib HTTP server on 127.0.0.1 + one static page; reads rows, never memory
 jarvis/app/       the double-clickable app: one instance, hidden children, tray, first-run setup
 jarvis/cc/        the Claude Code driver — its own OS process, never speaks
@@ -189,7 +192,26 @@ The desk has a wake word: it starts ASLEEP and sends nothing to Gemini until it 
 `openwakeword` package drags in scipy/scikit-learn and needs tflite-runtime on Linux). A configured wake
 word with no model is a REFUSAL, never a silent fallback to always-listening. Those pretrained models are
 **CC BY-NC-SA** (non-commercial): they are downloaded at runtime and must NEVER be committed — see
-[ADR 0012](docs/adr/0012-wake-model-is-non-commercial.md). And the smaller ones:
+[ADR 0012](docs/adr/0012-wake-model-is-non-commercial.md).
+
+What starts a turn is NOT loudness. `jarvis/audio/vadmodel.py` picks Silero v6.2.3 on onnxruntime (MIT,
+pinned by sha256, bundled in the exe, never committed: `packaging/models/` is ignored) and a turn needs
+4 of 5 speech frames; with no model, a voiced-energy detector and 3 of 4. The old `EnergyVad` with three
+loud frames in a row opened a turn on 13 of 13 synthesised breaths and clicks. `voice.vad = "energy"` is the way back.
+Hesitations Gemini transcribes as "huh"/"que" are dropped from the transcript a yes is read from
+(`jarvis/audio/fillers.py`), never from the logged events.
+
+**This computer** (the desk and the chats; never Telegram or the phone, whose profiles do not name the
+tools): `open_app`/`open_website`/`open_folder`/`volume`/`media`/`lock_screen`/`close_app`/`power`
+(`jarvis/tools/builtin/pc.py` → `jarvis/pc/`), `run_command` (→ `jarvis/shell/`),
+`claude_code_status` (`jarvis/cc/status.py`, which is why "am I logged in" no longer gets "I can't see
+your terminal"), and `look_at_screen` (one GDI picture, recorded as a `capture.vision` effect BEFORE it
+goes to Gemini). Closing, power and commands use `jarvis/tools/confirm.py`: two calls of one tool, the
+second honoured only when the USER's words after the read-back say yes. A yes is deliberately not a
+`requests` row (it must never be routed to Telegram), and `effects.confirmed_by_request_id` is a foreign
+key to `requests`, so the yes goes in `provider_ref["confirmed_by"]`. A shutdown is Jarvis's own
+one-minute countdown, then `InitiateShutdownW` with grace 0 and never FORCE: Windows refuses a grace
+period without FORCE. And the smaller ones:
 `DESK.tools` still names `explain_option` and `job_control`, which do not exist (`doctor` prints which).
 `voice.output_device` is a config key nothing reads. Reminders and Telegram both need `python -m jarvis.schedule` running.
 

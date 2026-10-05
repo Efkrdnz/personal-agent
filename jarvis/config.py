@@ -135,6 +135,11 @@ class Voice:
     #: Open speakers are the upgrade AEC buys, not the baseline it must deliver.
     #: tools/aec_bench.py decides this with a pass/fail rule fixed in advance.
     assume_headset: bool = True
+    #: How the desk decides a sound is the user speaking. "auto": the Silero model,
+    #: or a basic voiced-sound detector if it is missing. "basic": that detector
+    #: alone. "energy": loudness alone, as before, when breaths started turns: the
+    #: way back if the new rule is ever deaf to someone's voice.
+    vad: str = "auto"
     #: None (or "" in TOML, which has no null) means the system's default device.
     input_device: str | None = None
     output_device: str | None = None
@@ -668,6 +673,9 @@ text_model = "gemini-3.8-flash"   # from the SDK model list; a 404 means change 
 gemini_voice = "Charon"
 reader_voice = "en-GB-RyanNeural"
 assume_headset = true    # run tools/aec_bench.py before trusting open speakers
+# How a sound counts as you speaking: "auto" (Silero), "basic", or "energy"
+# (loudness only, the old way: breaths start turns).
+vad = "auto"
 web_search = true
 # Words recognisers get wrong when YOU say them: names, jargon, project names.
 vocabulary = ["quote", "Jarvis", "Claude Code"]

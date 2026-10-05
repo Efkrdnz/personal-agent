@@ -708,7 +708,9 @@ class _Handler(BaseHTTPRequestHandler):
             extra = {**dict(s.extra), CONFIRMATIONS: Confirmations(), DIRECT_HUMAN: True}
             ctx = ToolCtx(con=con, channel="cli", actor="window", extra=extra)
             said = s.registry.dispatch(name.strip(), args, ctx)
-        self._json(200, {"ok": True, "said": said})
+        # A Reply serialises as its summary; its detail (a command's output)
+        # is what the person who pressed Run came for.
+        self._json(200, {"ok": True, "said": said, "detail": getattr(said, "detail", "")})
 
     def _api_chat(self, query: dict[str, list[str]]) -> None:
         body = self._body()

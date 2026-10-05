@@ -81,6 +81,25 @@ A new phone is **Unpair**, then **Pair my phone** again.
 Windows 11 has a switch that silently gives desktop apps no microphone at all:
 **Settings → Privacy & security → Microphone → Let desktop apps access your microphone** must be **On**.
 
+### What you can ask it to do on this PC
+
+- **Open things:** *"open Spotify"*, *"open the Downloads folder"*, *"open YouTube"*, *"open Bluetooth
+  settings"*. If two apps match, it asks which.
+- **Sound and music:** *"volume to 30"*, *"mute"*, *"next song"*, *"pause"*.
+- **Lock, sleep, restart, shut down:** *"lock the screen"*, *"shut down"*. A shutdown or restart waits one
+  minute; say *"cancel the shutdown"* to stop it. Apps with unsaved work still ask you first.
+- **Commands:** *"run ipconfig"*, *"how much space is left on C"*. Jarvis reads the exact command back and
+  runs it only after you say **yes**. It runs hidden, in your home folder, with your saved keys kept out
+  of it, and stops after a minute unless you asked for longer. **Stop everything** stops it too. The full
+  command and what it printed are in the window's activity feed.
+- **Claude Code:** *"am I logged in to Claude Code?"* asks Claude Code itself.
+- **Your screen:** *"what's on my screen?"*, *"read me that error"*. It takes one picture when you ask,
+  sends it to Google's Gemini to be read, and keeps nothing. The activity feed always shows that it
+  looked. It will not take the picture while a password manager or a file of keys is in front.
+
+Closing an app, sleeping, restarting, shutting down and running a command always need your yes. Over
+Telegram or the phone, none of these are offered: they work only at this computer.
+
 ### Not in the app yet
 
 Building software with Claude Code by voice ("build me a to-do app") is not wired into the app yet, and

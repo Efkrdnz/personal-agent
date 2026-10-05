@@ -54,6 +54,11 @@ jobs:
       - name: Format
         run: uv run ruff format --check .
 
+      # MIT, pinned by sha256 in jarvis/audio/vadmodel.py, never committed: the
+      # real-model tests skip without it, and they are the ones that matter.
+      - name: Fetch the voice activity model
+        run: uv run python -m jarvis.audio.vadmodel download packaging/models
+
       - name: Tests
         run: uv run pytest -q
 

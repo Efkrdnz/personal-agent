@@ -380,13 +380,20 @@ def test_the_users_choice_of_address_reaches_the_desk(con: sqlite3.Connection) -
     from jarvis.live import persona
     from jarvis.live.profiles import DESK, PHONE_USER
 
+    withheld = cli.withheld_tools()
+    able = {
+        "builds": "code_build" not in withheld,
+        "pc": "open_app" not in withheld,
+        "commands": "run_command" not in withheld,
+        "vision": "look_at_screen" not in withheld,
+    }
     cfg = Config(persona=Persona(address="ma'am", name="Ada"))
     desk = cli.heard_profile(cfg, con, DESK)
-    assert desk.system_instruction.startswith(persona.desk_instruction("ma'am", "Ada"))
+    assert desk.system_instruction.startswith(persona.desk_instruction("ma'am", "Ada", **able))
     phone = cli.heard_profile(cfg, con, PHONE_USER)
     assert phone.system_instruction.startswith(persona.phone_instruction("ma'am", "Ada"))
     plain = cli.heard_profile(Config(), con, DESK)
-    assert plain.system_instruction.startswith(DESK.system_instruction)
+    assert plain.system_instruction.startswith(persona.desk_instruction(**able))
     other = cli.heard_profile(cfg, con, replace(DESK, name="other", system_instruction="X"))
     assert other.system_instruction.startswith("X")
 
@@ -907,10 +914,12 @@ def test_the_app_offers_no_build_it_would_never_carry_out(
 ) -> None:
     # Nothing in the app advances a build request: offered, "build me X" was
     # filed, promised, never started, and then blocked every later build.
-    assert cli.withheld_tools(in_app=True) == ("code_build",)
-    assert cli.withheld_tools(in_app=False) == ()
+    # Whether this machine can be driven is its own question (a headless CI box
+    # cannot), pinned here so this test is only about the app.
+    assert cli.withheld_tools(in_app=True, pc_available=True) == ("code_build",)
+    assert cli.withheld_tools(in_app=False, pc_available=True) == ()
     monkeypatch.setenv("JARVIS_APP", "1")
-    assert cli.withheld_tools() == ("code_build",)
+    assert cli.withheld_tools(pc_available=True) == ("code_build",)
 
     app_window = cli.build_window_services(Config(), str(dbpath), late_key=True)
     assert "code_build" not in app_window.registry.names("cli")

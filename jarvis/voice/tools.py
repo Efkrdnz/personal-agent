@@ -42,6 +42,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from jarvis import requests as rq
+from jarvis.audio.fillers import without_fillers
 from jarvis.hearing import Heard
 from jarvis.live.profiles import SessionProfile
 from jarvis.live.session import ToolCall, ToolResult
@@ -108,10 +109,13 @@ class Transcript:
             self._parts.popleft()
 
     def words(self) -> str:
-        """The window as one string, whitespace folded. May be empty."""
+        """The window as one string, whitespace folded, hesitation sounds left out. May be empty."""
         with self._lock:
             self._trim()
-            return " ".join("".join(p for _, p in self._parts).split())
+            # "huh", "que": what Gemini writes for a breath or an "mm" that got
+            # through. Dropped from the JOINED text, never per fragment: a
+            # fragment can be half a word.
+            return without_fillers("".join(p for _, p in self._parts))
 
     def mark(self) -> float:
         """Now, as a position :meth:`since` understands. For "what did they say after I asked"."""
@@ -123,7 +127,7 @@ class Transcript:
             return ""
         after = float(mark) + self.settle_s
         with self._lock:
-            return " ".join("".join(p for t, p in self._parts if t >= after).split())
+            return without_fillers("".join(p for t, p in self._parts if t >= after))
 
     def clear(self) -> None:
         """Forget the window. Called once a request has consumed it."""

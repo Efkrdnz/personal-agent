@@ -778,7 +778,7 @@ def test_tool_reaches_the_registry_as_cli_and_window(
 ) -> None:
     r = post(srv, "/api/tool", {"name": "probe", "args": {"text": "abc"}})
     assert r.status == 200
-    assert r.body == {"ok": True, "said": "probed abc"}
+    assert r.body == {"ok": True, "said": "probed abc", "detail": ""}
     [ctx] = fakes.tool_calls
     assert (ctx.channel, ctx.actor) == ("cli", "window")
     from jarvis.tools.confirm import CONFIRMATIONS, DIRECT_HUMAN

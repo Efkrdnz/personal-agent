@@ -24,6 +24,7 @@ from jarvis import __main__ as cli
 from jarvis import hearing
 from jarvis.config import Config, Voice
 from jarvis.db import connect, migrate
+from jarvis.live import persona as manner
 from jarvis.live.profiles import DESK, PHONE_USER, live_connect_config
 from jarvis.live.session import ToolCall
 from jarvis.live.text import GeminiArbiter, TextCallFailed
@@ -290,7 +291,19 @@ def test_the_composition_root_builds_a_profile_that_knows_the_lexicon(
     hearing.teach(con, "jason", "json")
     cfg = Config(voice=Voice(vocabulary=("Kubernetes",), languages=("en-US", "tr-TR")))
     prof = cli.heard_profile(cfg, con, DESK)
-    assert "jason" in prof.system_instruction and DESK.system_instruction in prof.system_instruction
+    # The desk's own words are rebuilt with what this machine lets it do, so the
+    # pin is "the desk's instruction, then the lexicon", not the default text.
+    withheld = cli.withheld_tools()
+    own = manner.desk_instruction(
+        cfg.persona.address,
+        cfg.persona.name,
+        builds="code_build" not in withheld,
+        pc="open_app" not in withheld,
+        commands="run_command" not in withheld,
+        vision="look_at_screen" not in withheld,
+    )
+    assert prof.system_instruction.startswith(own)
+    assert "jason" in prof.system_instruction
     assert "json" in prof.vocabulary and "kubernetes" in prof.vocabulary
     assert prof.language_codes == ("en-US", "tr-TR")
     off = cli.heard_profile(Config(voice=Voice(asr_vocabulary=False)), con, DESK)

@@ -1800,6 +1800,20 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+.result-detail {
+  margin: 8px 0 0;
+  padding: 8px;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--ice);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .tool-list {
   display: grid;
   gap: 4px;

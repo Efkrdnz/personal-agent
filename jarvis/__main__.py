@@ -271,6 +271,16 @@ def _check_claude_cli(r: Report) -> None:
         r.add(OK, f"  {exe}")
     except (OSError, subprocess.SubprocessError) as exc:
         r.add(WARN, f"{exe} would not report a version: {type(exc).__name__}")
+    # The same question "am I logged in to Claude Code" asks, the same way.
+    from jarvis.cc import status as cc_status
+
+    facts = cc_status.probe(exe)
+    if facts["logged_in"] is True:
+        r.add(OK, f"  signed in ({facts.get('auth_method') or 'method not reported'})")
+    elif facts["logged_in"] is False:
+        r.add(WARN, "  not signed in: `claude auth login`, or Settings in the Jarvis window")
+    else:
+        r.add(WARN, f"  sign-in unknown: {facts['error']}")
 
 
 def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
@@ -381,6 +391,18 @@ def _check_wake(r: Report, cfg: cfgmod.Config | None) -> None:
     r.add(WARN, LICENCE)
 
 
+def _check_vad(r: Report) -> None:
+    """Never blocking: without the model the desk uses the basic detector and says so."""
+    from jarvis.audio import vadmodel
+
+    r.section("voice activity")
+    if not _installed("onnxruntime"):
+        r.add(WARN, 'onnxruntime is not installed: the desk uses the basic detector (".[wake]")')
+        return
+    ok, line = vadmodel.diagnose()
+    r.add(OK if ok else WARN, line)
+
+
 def _check_hearing(r: Report, cfg: cfgmod.Config | None, db_path: str | None) -> None:
     """Never blocking: an empty lexicon still transcribes, it just mishears more."""
     from jarvis import hearing
@@ -473,6 +495,39 @@ def _check_tool_surface(r: Report) -> None:
             r.add(WARN, f"  built but never offered on {channel}: {', '.join(unreachable)}")
 
 
+def _check_computer(r: Report) -> None:
+    """Never blocking: everything else works on a machine Jarvis cannot drive.
+
+    Reads what the tools would read and changes nothing: the app list, which
+    shell a command would run in, and whether a picture of the screen is possible.
+    """
+    from jarvis import pc
+    from jarvis.capture import choose_capturer
+    from jarvis.shell import Shell
+
+    r.section("this computer")
+    desk = pc.choose_desktop()
+    status = desk.status()
+    if not status.available:
+        r.add(WARN, f"opening and closing apps is off here: {status.detail}")
+    else:
+        try:
+            desk.apps()
+        except pc.PcRefused as exc:
+            r.add(WARN, f"{status.backend}: {exc}")
+        else:
+            status = desk.status()
+            r.add(WARN if "unread:" in status.detail else OK, status.detail)
+    shell = Shell.here()
+    r.add(OK, f"commands run in {shell.spoken}, after your yes: {shell.spec.argv[0]}")
+    cap = choose_capturer()
+    seen = cap.status()
+    if seen.available:
+        r.add(OK, f"screen: {cap.name}")
+    else:
+        r.add(WARN, f"screen: {seen.refusal.spoken if seen.refusal else 'unavailable'}")
+
+
 def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: str) -> None:
     """Per-command readiness, because "ready" is not one fact.
 
@@ -546,9 +601,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     audio_ok, audio_why = _check_audio(r, cfg)
     _check_location(r, cfg)
     _check_wake(r, cfg)
+    _check_vad(r)
     _check_hearing(r, cfg, args.db)
     _check_reader(r, cfg)
     _check_tool_surface(r)
+    _check_computer(r)
     _readiness(r, cfg, audio_ok, audio_why)
 
     print("\n".join(r.lines).strip())
@@ -669,7 +726,9 @@ def locator_for(cfg: cfgmod.Config) -> Any:
     )
 
 
-def withheld_tools(*, in_app: bool | None = None) -> tuple[str, ...]:
+def withheld_tools(
+    *, in_app: bool | None = None, pc_available: bool | None = None
+) -> tuple[str, ...]:
     """Tools nothing in this process tree would carry out, so they are not offered. Wiring only.
 
     The app runs the desk, the scheduler and the bot (jarvis.app.supervisor's
@@ -677,10 +736,21 @@ def withheld_tools(*, in_app: bool | None = None) -> tuple[str, ...]:
     does that, from a terminal. Offered in the app, "build me X" was filed,
     promised, never advanced, and then refused every later build as already
     in progress. ``in_app`` defaults to whether the app started this process.
+    The same for the PC tools on a machine Jarvis cannot drive (a server with
+    no desktop): the decision is jarvis.pc.available()'s.
     """
     if in_app is None:
         in_app = os.environ.get("JARVIS_APP") == "1"
-    return ("code_build",) if in_app else ()
+    withheld: tuple[str, ...] = ("code_build",) if in_app else ()
+    if pc_available is None:
+        from jarvis import pc
+
+        pc_available = pc.available()
+    if not pc_available:
+        from jarvis.tools.builtin.pc import TOOLS as PC_TOOLS
+
+        withheld += tuple(t.name for t in PC_TOOLS)
+    return withheld
 
 
 def tool_extra(cfg: cfgmod.Config, api_key: str | None = None) -> dict[str, Any]:
@@ -698,6 +768,26 @@ def tool_extra(cfg: cfgmod.Config, api_key: str | None = None) -> dict[str, Any]
         from jarvis.live.text import GeminiSearch
 
         extra["search"] = GeminiSearch(api_key=api_key, model=cfg.voice.text_model)
+    from jarvis import pc
+    from jarvis.cc import status as cc_status
+    from jarvis.tools.builtin.computer import CLAUDE_STATUS
+    from jarvis.tools.builtin.pc import DESKTOP
+
+    # This computer. Cheap to build: no DLL is loaded and the app list is not
+    # read until first use (or until the desk warms it).
+    extra[DESKTOP] = pc.choose_desktop()
+    # Asked of the CLI the driver would run, lazily: the probe costs only when asked.
+    extra[CLAUDE_STATUS] = lambda: cc_status.probe(claude_cli_path())
+    if api_key and _installed("google.genai"):
+        from jarvis.capture import choose_capturer
+        from jarvis.capture.look import Eyes
+        from jarvis.live.text import GeminiVision
+        from jarvis.tools.builtin.screen import EYES
+
+        extra[EYES] = Eyes(
+            capturer=choose_capturer(),
+            ask=GeminiVision(api_key=api_key, model=cfg.voice.text_model),
+        )
     return extra
 
 
@@ -753,9 +843,16 @@ def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any
     # How Jarvis addresses the user is a setting, so the two profiles that talk
     # to the user are rebuilt with it; any other profile keeps its own words.
     # And the desk says it can build only where a build would be carried out.
-    builds = "code_build" not in withheld_tools()
+    # The desk is told it can do exactly what its registry will let it do.
+    withheld = withheld_tools()
+    builds = "code_build" not in withheld
+    pc_on = "open_app" not in withheld
+    commands = "run_command" not in withheld
+    vision = "look_at_screen" not in withheld
     addressed = {
-        "desk": lambda a, n: manner.desk_instruction(a, n, builds=builds),
+        "desk": lambda a, n: manner.desk_instruction(
+            a, n, builds=builds, pc=pc_on, commands=commands, vision=vision
+        ),
         "phone_user": manner.phone_instruction,
     }
     build = addressed.get(prof.name)
@@ -1179,7 +1276,8 @@ def cmd_chat(args: argparse.Namespace) -> int:
         return 2
 
     con = db.open_db(args.db)
-    reg = registry()
+    # Withheld as everywhere else, or a headless box is told it can drive the PC.
+    reg = registry(without=withheld_tools())
     typed = TypedTurns()
     ctx = ToolCtx(
         con=con,
@@ -1193,7 +1291,12 @@ def cmd_chat(args: argparse.Namespace) -> int:
         declarations=reg.declarations("cli"),
         dispatch=lambda name, a: reg.dispatch(name, a, ctx),
         system_instruction=persona(
-            extra=remembered(con), address=cfg.persona.address, name=cfg.persona.name
+            extra=remembered(con),
+            address=cfg.persona.address,
+            name=cfg.persona.name,
+            pc="open_app" in reg.names("cli"),
+            commands="run_command" in reg.names("cli"),
+            vision="look_at_screen" in reg.names("cli"),
         ),
     )
     speaker = None
@@ -1311,6 +1414,20 @@ def cmd_weather(args: argparse.Namespace) -> int:
 # ───────────────────────────── wake word ─────────────────────────────
 
 
+def _download_vad() -> None:
+    """The voice detector rides along with the wake models: one command fetches both."""
+    from jarvis.audio import vadmodel
+
+    try:
+        path = vadmodel.download()
+    except Exception as exc:  # noqa: BLE001 - the desk falls back without it; say so, go on
+        print(
+            f"{WARN}  couldn't download the voice detector ({exc}); the desk will use the basic one"
+        )
+        return
+    print(f"{OK}  {vadmodel.MODEL} in {path.parent} ({vadmodel.LICENCE})")
+
+
 def cmd_wake(args: argparse.Namespace) -> int:
     """`wake download` fetches the models; `wake test` says what score a phrase gets."""
     from jarvis.audio import wake
@@ -1326,6 +1443,7 @@ def cmd_wake(args: argparse.Namespace) -> int:
             return 1
         print(f"{OK}  {', '.join(got) if got else 'already present'} in {where}")
         print(f"{WARN}  {wake.LICENCE}")
+        _download_vad()
         return 0
 
     try:
@@ -1540,6 +1658,9 @@ def _window_chat(
             address=cfg.persona.address,
             name=cfg.persona.name,
             builds="code_build" in reg.names("cli"),
+            pc="open_app" in reg.names("cli"),
+            commands="run_command" in reg.names("cli"),
+            vision="look_at_screen" in reg.names("cli"),
         ),
     )
 
@@ -1971,7 +2092,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
 
     from jarvis.audio import BLOCK, DEV_RATE, MIC_RATE
     from jarvis.audio.devices import DeviceError
-    from jarvis.audio.dsp import AecUnavailable, EnergyVad
+    from jarvis.audio.dsp import AecUnavailable
     from jarvis.audio.graph import AudioEvent, AudioGraph, QueuedEventSink
     from jarvis.audio.legs import DeskLeg
     from jarvis.audio.micbus import MicBus
@@ -1979,6 +2100,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     from jarvis.audio.turn import TurnController
     from jarvis.live.profiles import DESK, SessionProfile
     from jarvis.live.session import GenaiConnector, LiveSession, QueuedLiveEvents, QueuedUplink
+    from jarvis.tools.builtin.pc import DESKTOP
     from jarvis.tools.confirm import Confirmations
     from jarvis.tools.default import registry
     from jarvis.voice.desk import DeskPublisher, desk_state
@@ -2013,12 +2135,20 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     # controller's own, into ONE queue the publisher drains. The controller had
     # no sink at all before, so "awake" happened and nothing anywhere knew.
     audio_events = QueuedEventSink()
+    # Chosen, and on a first pip run downloaded, BEFORE the stream opens:
+    # nothing may block the audio callback. Loudness alone was the bug: every
+    # breath into a headset is as loud as a word.
+    vad = _desk_vad(cfg)
     turn = TurnController(
         mixer=mixer,
-        vad=EnergyVad(),
+        vad=vad.vad,
         uplink=uplink,
         on_event=lambda e: audio_events(AudioEvent(kind=e.kind, at=e.at, detail=dict(e.detail))),
         wake_window_s=cfg.voice.wake_window_s if cfg.voice.wake_word else None,
+        idle_onset=vad.idle_onset,
+        idle_preroll_ms=vad.idle_preroll_ms,
+        preroll_ms=vad.barge_preroll_ms,
+        max_turn_s=vad.max_turn_s,
     )
     try:
         aec = leg.make_aec()
@@ -2057,6 +2187,9 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     # never awaited, and the question marked presented having been said to nobody.
     questions = DeskQuestions(open_db=lambda: db.open_db(args.db))
     desk_registry = registry(without=withheld_tools())
+    desk_extra = tool_extra(cfg, key)
+    # The first "open Spotify" must not wait for the Start menu to be read.
+    desk_extra[DESKTOP].warm()
     tools = LiveTools(
         registry=desk_registry,
         # A fresh connection per tool call, opened in the worker thread that
@@ -2067,7 +2200,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         transcript=transcript,
         questions=questions,
         speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
-        extra=tool_extra(cfg, key),
+        extra=desk_extra,
         hearing=hearing_for(cfg, key),
         # Without this no tool that needs a spoken yes can act at the desk.
         confirmations=Confirmations(),
@@ -2123,6 +2256,24 @@ def desk_redactor() -> Any:
             if value := secrets.get(s.name):
                 values.append(value)
     return Redactor.of(values)
+
+
+def _desk_vad(cfg: cfgmod.Config) -> Any:
+    """The desk's voice detector, chosen before the audio stream opens. Wiring only.
+
+    The decision is ``jarvis.audio.vadmodel.choose``'s. Unlike the wake word, a
+    missing model is a WARNING and not a refusal: it costs quality, not privacy.
+    """
+    from jarvis.audio import vadmodel
+
+    try:
+        choice = vadmodel.choose(mode=cfg.voice.vad)
+    except ValueError as exc:
+        raise StartupRefused(f"{exc}. Set voice.vad in config.toml.", action="voice") from exc
+    print(f"{OK if choice.warning is None else WARN}  voice activity: {choice.detail}")
+    if choice.warning:
+        print(f"{WARN}  {choice.warning}")
+    return choice
 
 
 def _desk_wake(

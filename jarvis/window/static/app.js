@@ -356,6 +356,11 @@
     return withoutCommands(value) || fallback || "";
   }
 
+  // Feed lines whose text IS a command or its output: the read-back of what will
+  // run, the run itself, and what it printed. Taking "commands" out of those
+  // would hide exactly what the user is being asked to say yes to.
+  const VERBATIM_KINDS = new Set(["confirm.proposed", "shell.started", "shell.finished"]);
+
   function terminal(name) {
     return app.inApp ? "" : TERMINAL[name] || "";
   }
@@ -859,7 +864,8 @@
       li.append(head, el("p", "msg-text", text.trimStart()));
     } else {
       li.dataset.kind = String(item.kind || "");
-      li.append(time, el("span", "msg-text", appText(text, "something needs attention")));
+      const shown = VERBATIM_KINDS.has(li.dataset.kind) ? text : appText(text, "something needs attention");
+      li.append(time, el("span", "msg-text", shown));
     }
     return li;
   }
@@ -1084,8 +1090,12 @@
   async function runTool(name, args) {
     const data = await api(API.tool, { name, args });
     const said = appText(typeof data.said === "string" ? data.said : "", "Done.");
+    // A command's output, as printed: never cleaned, it is not our sentence.
+    const detail = typeof data.detail === "string" ? data.detail.trim() : "";
     setText(dom.resultHead, `${name} · ${clockFmt.format(new Date())}`);
     setText(dom.resultText, said);
+    setText(dom.resultDetail, detail);
+    show(dom.resultDetail, Boolean(detail));
     show(dom.result, true);
     toast(said, { head: name });
     scheduleRefresh();
@@ -2601,6 +2611,7 @@
     dom.result = byId("tool-result");
     dom.resultHead = byId("tool-result-head");
     dom.resultText = byId("tool-result-text");
+    dom.resultDetail = byId("tool-result-detail");
     dom.openPalette = byId("open-palette");
     dom.toolList = byId("tool-list");
     dom.toolsEmpty = byId("tools-empty");

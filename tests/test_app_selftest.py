@@ -61,6 +61,11 @@ def test_the_contract_checks_are_all_there(linux_report: tuple[int, dict]) -> No
         "time zones",
         "british voice",
         "tray",
+        "voice activity",
+        "terminal commands",
+        "desktop control",
+        "screen capture",
+        "claude code sign-in",
     } <= set(results)
     assert results["window server"]["ok"], results["window server"]
     assert results["database"]["ok"] and results["claude code"]["ok"]

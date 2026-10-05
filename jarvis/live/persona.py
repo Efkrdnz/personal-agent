@@ -290,6 +290,9 @@ def desk_instruction(
         (
             spoken(address, name),
             "Where you are: at the user's desk, by voice. Be brief: this is speech.",
+            # The detector stops breaths; a voiced "mm" still gets through it.
+            "A breath, a cough or a lone hesitation sound (hmm, uh, huh) is not a request:",
+            "say nothing and wait for the user to go on.",
             _abilities(
                 "answer questions, give the weather and the time anywhere, remember things, "
                 "set reminders, search the web for anything current",

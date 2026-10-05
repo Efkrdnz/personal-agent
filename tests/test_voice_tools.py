@@ -482,3 +482,13 @@ def test_the_desk_app_bridges_the_reader_across_the_thread_boundary() -> None:
     assert "questions.speak = " in body
     # And _build_desk must NOT set it, since there is no loop to bridge to yet.
     assert "speak=" not in _inspect.getsource(cli._build_desk).split("DeskQuestions(")[1][:200]
+
+
+def test_a_breath_heard_as_huh_never_reaches_a_read_back() -> None:
+    t = Transcript()
+    for fragment in ("Huh?", " que", " Hmm.", " open note", "pad", " uh-huh"):
+        t.heard(fragment)
+    assert t.words() == "open notepad uh-huh"
+    t.clear()
+    t.heard("Huh? que")
+    assert not t, "a window of hesitations is an empty window"
