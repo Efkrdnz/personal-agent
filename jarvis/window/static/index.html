@@ -338,6 +338,7 @@
               <div class="set-row">
                 <label class="set-label" for="set-mic">Microphone</label>
                 <select class="set-input" id="set-mic" data-key="voice.input_device" data-kind="text"></select>
+                <button class="btn btn-quiet mic-rescan" id="set-mic-rescan" type="button">Look again</button>
                 <span class="set-hint" id="set-mic-hint">Only devices that can both listen and speak are listed. A headset is ideal.</span>
               </div>
               <div class="set-row">
@@ -541,6 +542,7 @@
       <p class="onboard-say">A headset is best: I can't hear myself in it, so you can interrupt me.</p>
       <div class="choice-list" id="ob-mics" role="radiogroup" aria-labelledby="ob-h-mic"></div>
       <p class="onboard-note" id="ob-mic-why"></p>
+      <button class="btn btn-quiet mic-rescan" id="ob-mic-rescan" type="button">Look again</button>
     </section>
 
     <section class="onboard-step" data-step="name" aria-labelledby="ob-h-name" hidden>

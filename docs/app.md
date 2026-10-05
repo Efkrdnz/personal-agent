@@ -67,6 +67,15 @@ You can change every one of these later in the **Settings** tab, which also has 
 keys, and **Sign in to Claude Code** (that one opens Claude Code's own sign-in window; follow it, then come
 back).
 
+### Jarvis on your phone (optional)
+
+1. In Telegram, message **@BotFather**, send `/newbot`, and follow it. It gives you a token.
+2. In Jarvis: **Settings → Keys → Telegram bot token → Add**, and paste it.
+3. Click **Pair my phone**. Jarvis shows an eight-character code for ten minutes.
+4. Send that code to your new bot from your phone. From then on the bot answers only you.
+
+A new phone is **Unpair**, then **Pair my phone** again.
+
 ### If Jarvis cannot hear you
 
 Windows 11 has a switch that silently gives desktop apps no microphone at all:

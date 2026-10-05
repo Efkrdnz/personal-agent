@@ -3428,3 +3428,26 @@ textarea.set-input {
     max-height: 90vh;
   }
 }
+
+.secret-pair {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.pair-code {
+  padding: 2px 10px;
+  border: 1px solid rgba(79, 209, 255, 0.5);
+  border-radius: var(--radius);
+  color: var(--ice);
+  font-family: var(--mono);
+  font-size: 16px;
+  letter-spacing: 0.2em;
+  user-select: all;
+}
+
+.mic-rescan {
+  justify-self: start;
+}

@@ -53,6 +53,25 @@ def list_devices(*, probe: Any | None = None) -> list[dict[str, str]]:
     return [{"label": label} for label in usable_devices(found)]
 
 
+def rescan_devices() -> None:
+    """Make PortAudio look at the hardware again. Never raises.
+
+    PortAudio reads the device list when it initialises, and sounddevice
+    initialises once, on import; in a process that lives as long as the app,
+    a headset plugged in after it started is never listed. Re-initialising
+    resets only this process's view. Never call it while this process has a
+    stream open: the voice samples are the one stream it can hold, and the
+    caller keeps them apart.
+    """
+    try:
+        import sounddevice as sd
+
+        sd._terminate()
+        sd._initialize()
+    except Exception:  # noqa: BLE001 - a stale list is better than no settings screen
+        pass
+
+
 def download_wake(
     phrase: str, *, model_dir: Path | None = None, fetch: Callable[[str], bytes] | None = None
 ) -> str:

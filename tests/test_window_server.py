@@ -1152,6 +1152,7 @@ APP_ROUTES = (
     ("POST", "/api/setup/wake"),
     ("POST", "/api/setup/preview"),
     ("POST", "/api/setup/claude"),
+    ("POST", "/api/setup/phone"),
     ("GET", "/api/app"),
     ("POST", "/api/app/restart"),
     ("POST", "/api/app/quit"),
@@ -1506,6 +1507,52 @@ def test_claude_sign_in(app_srv: WindowServer, parts: AppParts) -> None:
     assert r.status == 200
     assert r.body == {"ok": True, "message": "The sign-in is open in your browser."}
     assert parts.calls["login"] == [1]
+
+
+def test_pairing_a_phone_from_the_window(
+    app_srv: WindowServer, parts: AppParts, dbpath: Path
+) -> None:
+    from jarvis.telegram import identity
+
+    r = post(app_srv, "/api/setup/phone", {"action": "pair"})
+    assert r.status == 502 and "bot token first" in r.body["error"]
+
+    parts.keyring.stored["telegram_bot_token"] = "123456:" + "A" * 35
+    r = post(app_srv, "/api/setup/phone", {"action": "pair"})
+    assert r.status == 200 and r.body["minutes"] == 10
+    code = r.body["code"]
+    assert code and "bot" in r.body["message"]
+
+    # The code the window showed is the one the bot accepts.
+    c = connect(dbpath)
+    try:
+        assert identity.redeem(c, 42, code).ok
+        assert identity.bound_chat(c) == 42
+    finally:
+        c.close()
+    assert call(app_srv, "GET", "/api/setup").body["phone"] == {"paired": True}
+
+    r = post(app_srv, "/api/setup/phone", {"action": "unpair"})
+    assert r.status == 200 and "no longer paired" in r.body["message"]
+    assert call(app_srv, "GET", "/api/setup").body["phone"] == {"paired": False}
+    for bad in ({}, {"action": "steal"}, {"action": 1}):
+        assert post(app_srv, "/api/setup/phone", bad).status == 400, bad
+
+
+def test_the_readouts_follow_the_settings_not_the_launch(make: ServerFactory) -> None:
+    now = {"wake_word": "hey jarvis", "wake_threshold": 0.5, "tz": "Europe/Istanbul"}
+    srv = make(readouts=lambda: dict(now))
+    first = call(srv, "GET", "/api/state").body
+    now.update(wake_word="", wake_threshold=0.3, tz="Europe/London")
+    second = call(srv, "GET", "/api/state").body
+    assert first != second, "a setting changed and the readout did not"
+
+
+def test_a_broken_readout_falls_back_to_the_launch_values(make: ServerFactory) -> None:
+    def boom() -> dict[str, Any]:
+        raise RuntimeError("config.toml is half-written")
+
+    assert call(make(readouts=boom), "GET", "/api/state").status == 200
 
 
 def test_app_status_is_the_supervisors_with_command_free_reasons(app_srv: WindowServer) -> None:

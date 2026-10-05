@@ -261,6 +261,7 @@ class SetupService:
         autostart: Callable[[bool], None] | None,
         claude_login: Callable[[], str] | None,
         control: Any | None = None,
+        rescan_devices: Callable[[], None] | None = None,
         run_later: Callable[[Callable[[], None]], None] | None = None,
         clock: Callable[[], datetime] = datetime.now,
     ) -> None:
@@ -275,6 +276,7 @@ class SetupService:
         self._autostart = autostart
         self._claude_login = claude_login
         self._control = control
+        self._rescan_devices = rescan_devices
         self._run_later = run_later or _daemon_thread
         self._clock = clock
         # Each save is read-modify-write of one file; two clicks at once must
@@ -285,12 +287,26 @@ class SetupService:
 
     # -- reading ------------------------------------------------------------
 
-    def status(self, processes: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    def status(
+        self, processes: Mapping[str, Mapping[str, Any]] | None = None, *, rescan: bool = False
+    ) -> dict[str, Any]:
         """Everything the onboarding and Settings tab show, in one read.
 
         ``processes`` is the supervisor's status; without it, the ``control``
-        given at construction is asked, if there is one.
+        given at construction is asked, if there is one. ``rescan`` looks at
+        the audio hardware again first, for a headset plugged in since.
         """
+        # Never under a playing sample: re-initialising PortAudio would pull
+        # its stream out from under it.
+        if (
+            rescan
+            and self._rescan_devices is not None
+            and self._preview_lock.acquire(blocking=False)
+        ):
+            try:
+                _quietly(self._rescan_devices, None)
+            finally:
+                self._preview_lock.release()
         problems: list[dict[str, Any]] = []
         try:
             cfg = cfgmod.load(self._config_path)
@@ -323,6 +339,7 @@ class SetupService:
                 else bool(_quietly(lambda: self._wake_ready(word), False)),
                 "licence": _wake_licence(),
             },
+            "phone": {"paired": self._phone_paired()},
             "devices": devices,
             "devices_why": devices_why,
             "settings": _settings(cfg),
@@ -522,6 +539,64 @@ class SetupService:
             "Good morning" if hour < 12 else "Good afternoon" if hour < 18 else "Good evening"
         )
         return f"{greeting}, {address}. This is {voice}. Shall I carry on in this voice?"
+
+    def pair_phone(self) -> dict[str, Any]:
+        """A one-time code that binds the user's Telegram chat to the bot, shown once.
+
+        Without a bound chat the bot drops every message, and the only other
+        way to get a code is ``python -m jarvis.telegram --bind`` in a terminal,
+        which a windowed app does not have. The code is never stored readably
+        (:mod:`jarvis.telegram.identity`) and a new one replaces the last.
+        """
+        from jarvis.telegram import identity
+
+        if not self._present("telegram_bot_token"):
+            raise RuntimeError("Store the Telegram bot token first; the code is for that bot.")
+        con = db.connect(self._db_path)
+        try:
+            code = identity.offer_code(con, by="window")
+        finally:
+            con.close()
+        minutes = identity.DEFAULT_TTL_S // 60
+        # The bot reads the offer from the database, but only while it runs.
+        self._restart_names(("telegram",), not self._running("telegram"))
+        return {
+            "ok": True,
+            "code": code,
+            "minutes": minutes,
+            "message": f"Send this code to your bot within {minutes} minutes.",
+        }
+
+    def unpair_phone(self) -> dict[str, Any]:
+        """Forget the paired chat, so a new phone can be paired."""
+        from jarvis.telegram import identity
+
+        con = db.connect(self._db_path)
+        try:
+            existed = identity.unbind(con, by="window")
+        finally:
+            con.close()
+        said = "Your phone is no longer paired." if existed else "No phone was paired."
+        return {"ok": True, "message": said}
+
+    def _phone_paired(self) -> bool:
+        from jarvis.telegram import identity
+
+        def paired() -> bool:
+            con = db.connect(self._db_path)
+            try:
+                return identity.bound_chat(con) is not None
+            finally:
+                con.close()
+
+        return bool(_quietly(paired, False))
+
+    def _running(self, name: str) -> bool:
+        if self._control is None:
+            return True  # unknown: assume so rather than restart something that works
+        processes = _quietly(self._control.status, None)
+        proc = processes.get(name) if isinstance(processes, Mapping) else None
+        return bool(isinstance(proc, Mapping) and proc.get("running"))
 
     def sign_in_claude(self) -> dict[str, Any]:
         """Open Claude Code's own sign-in. Jarvis never sees the account's credentials."""

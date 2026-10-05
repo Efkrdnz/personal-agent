@@ -1361,6 +1361,17 @@ def build_window_services(
         now = _as_of_now(reload or (lambda: cfg))
         chat, chat_why = _late_chat(now, db_path, reg, notes_paragraph), ""
         tools_extra = _ExtraNow(now)
+    readouts = None
+    if reload is not None:
+
+        def readouts() -> dict[str, Any]:
+            c = reload()
+            return {
+                "wake_word": _wake_phrase(c),
+                "wake_threshold": c.voice.wake_threshold,
+                "tz": c.tz,
+            }
+
     return Services(
         open_db=lambda: db.connect(db_path),
         registry=reg,
@@ -1372,6 +1383,7 @@ def build_window_services(
         wake_threshold=cfg.voice.wake_threshold,
         spend_threshold_usd=cfg.spend_threshold_usd,
         tz=cfg.tz,
+        readouts=readouts,
         redactor=redactor,
         setup=setup,
         control=control,
@@ -2429,6 +2441,7 @@ def _setup_service(
         autostart=adapters.autostart_switch(),
         claude_login=lambda: adapters.claude_login(claude_cli_path()),
         control=control,
+        rescan_devices=adapters.rescan_devices,
     )
 
 

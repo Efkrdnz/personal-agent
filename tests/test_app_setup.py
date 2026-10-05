@@ -853,3 +853,79 @@ def test_the_module_keeps_no_mutable_state() -> None:
         if name.startswith("__"):
             continue
         assert not isinstance(value, (list, dict, set)), name
+
+
+# ───────────────────────────── pairing a phone ─────────────────────────────
+
+
+def test_pairing_needs_the_bot_first(svc: SetupService) -> None:
+    with pytest.raises(RuntimeError, match="bot token first"):
+        svc.pair_phone()
+
+
+def test_pairing_starts_a_bot_that_is_not_running_to_hear_the_code(
+    make: Build, fakes: Fakes, keys: FakeSecrets
+) -> None:
+    # The bot redeems the code from the database, but only while it polls.
+    class Control:
+        def status(self) -> dict[str, Any]:
+            return {"telegram": {"running": False, "held": False}}
+
+    keys.stored["telegram_bot_token"] = "123456:" + "B" * 35
+    reply = make(control=Control()).pair_phone()
+    assert reply["code"] and reply["minutes"] == 10
+    assert fakes.restarts == ["telegram"]
+    _no_command(reply)
+
+
+def test_a_running_bot_is_left_alone_when_pairing(
+    make: Build, fakes: Fakes, keys: FakeSecrets
+) -> None:
+    class Control:
+        def status(self) -> dict[str, Any]:
+            return {"telegram": {"running": True, "held": False}}
+
+    keys.stored["telegram_bot_token"] = "123456:" + "B" * 35
+    make(control=Control()).pair_phone()
+    assert fakes.restarts == []
+
+
+# ───────────────────────────── a headset plugged in later ─────────────────────────────
+
+
+def test_looking_again_rescans_the_hardware_before_listing(make: Build, fakes: Fakes) -> None:
+    order: list[str] = []
+    fakes_list = fakes.list_devices
+
+    def listed() -> list[dict[str, Any]]:
+        order.append("list")
+        return fakes_list()
+
+    svc = make(list_devices=listed, rescan_devices=lambda: order.append("rescan"))
+    svc.status()
+    assert order == ["list"], "an ordinary read costs PortAudio no restart"
+    order.clear()
+    svc.status(rescan=True)
+    assert order == ["rescan", "list"]
+
+
+def test_no_rescan_while_a_voice_sample_is_playing(make: Build) -> None:
+    rescans: list[int] = []
+    svc = make(rescan_devices=lambda: rescans.append(1))
+    assert svc._preview_lock.acquire(blocking=False)
+    try:
+        svc.status(rescan=True)
+    finally:
+        svc._preview_lock.release()
+    assert rescans == []
+
+
+def test_the_real_rescan_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    import sys
+    import types
+
+    from jarvis.app import adapters
+
+    broken = types.SimpleNamespace(_terminate=lambda: None, _initialize=lambda: 1 / 0)
+    monkeypatch.setitem(sys.modules, "sounddevice", broken)
+    adapters.rescan_devices()

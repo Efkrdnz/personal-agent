@@ -156,6 +156,9 @@ class Services:
     #: Applied to what the window publishes. What the user types is kept in a
     #: log that is kept forever, and a pasted token must not be.
     redactor: Redactor | None = None
+    #: The app's: ``{"wake_word", "wake_threshold", "tz"}`` as the settings are
+    #: NOW, overriding the fields above, which hold what they were at launch.
+    readouts: Callable[[], dict[str, Any]] | None = None
     #: The app's settings and onboarding (``jarvis.app.setup.SetupService``),
     #: duck-typed: this layer may not import the app. None outside the app.
     setup: Any | None = None
@@ -570,14 +573,20 @@ class _Handler(BaseHTTPRequestHandler):
 
     def _api_state(self, query: dict[str, list[str]]) -> None:
         s = self.server.services
+        now: dict[str, Any] = {}
+        if s.readouts is not None:
+            try:
+                now = dict(s.readouts())
+            except Exception:  # noqa: BLE001 - the launch-time values still render
+                traceback.print_exc(file=sys.stderr)
         with self._db() as con:
             body = snapshot.state(
                 con,
                 tools=s.registry.declarations("cli"),
-                wake_word=s.wake_word,
-                wake_threshold=s.wake_threshold,
+                wake_word=now.get("wake_word", s.wake_word),
+                wake_threshold=now.get("wake_threshold", s.wake_threshold),
                 spend_threshold_usd=s.spend_threshold_usd,
-                tz=s.tz,
+                tz=now.get("tz", s.tz),
                 chat_available=s.chat is not None,
                 chat_why=s.chat_why,
                 speech_available=s.speak is not None,
@@ -834,7 +843,10 @@ class _Handler(BaseHTTPRequestHandler):
         procs = self._app_processes()
         # The supervisor's view is handed over so a held process is a problem
         # card even when the app built the service without a control.
-        self._json(200, _ask(lambda: setup.status(processes=procs)))
+        # ?rescan=1 asks for a fresh look at the audio hardware; the page
+        # sends it only when the user asks, since it costs PortAudio a restart.
+        rescan = query.get("rescan", [""])[0] == "1"
+        self._json(200, _ask(lambda: setup.status(processes=procs, rescan=rescan)))
 
     def _api_setup_secret(self, query: dict[str, list[str]]) -> None:
         """Store a credential. The value goes to the keyring and nowhere else.
@@ -902,6 +914,19 @@ class _Handler(BaseHTTPRequestHandler):
         reply = _ask(lambda: setup.preview(voice.strip()))
         self._json(200, {**(reply if isinstance(reply, dict) else {}), "ok": True})
 
+    def _api_setup_phone(self, query: dict[str, list[str]]) -> None:
+        """Pair or unpair the Telegram chat. The pairing code is in this reply and nowhere else."""
+        setup = self._setup()
+        body = self._body()
+        action = body.get("action")
+        if action == "pair":
+            reply = _ask(setup.pair_phone)
+        elif action == "unpair":
+            reply = _ask(setup.unpair_phone)
+        else:
+            raise _Refusal(400, 'Send {"action": "pair"} or {"action": "unpair"}.')
+        self._json(200, {**(reply if isinstance(reply, dict) else {}), "ok": True})
+
     def _api_setup_claude(self, query: dict[str, list[str]]) -> None:
         setup = self._setup()
         self._body()
@@ -953,6 +978,7 @@ _ROUTES: dict[str, tuple[str, _Route]] = {
     "/api/setup/wake": ("POST", _Handler._api_setup_wake),
     "/api/setup/preview": ("POST", _Handler._api_setup_preview),
     "/api/setup/claude": ("POST", _Handler._api_setup_claude),
+    "/api/setup/phone": ("POST", _Handler._api_setup_phone),
     "/api/app": ("GET", _Handler._api_app),
     "/api/app/restart": ("POST", _Handler._api_app_restart),
     "/api/app/quit": ("POST", _Handler._api_app_quit),

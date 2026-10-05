@@ -45,6 +45,7 @@ ENDPOINTS = frozenset(
         "/api/setup/wake",
         "/api/setup/preview",
         "/api/setup/claude",
+        "/api/setup/phone",
         "/api/app",
         "/api/app/restart",
         "/api/app/quit",

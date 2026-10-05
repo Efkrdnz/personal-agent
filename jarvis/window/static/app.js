@@ -46,6 +46,7 @@
     setupWake: "/api/setup/wake",
     setupPreview: "/api/setup/preview",
     setupClaude: "/api/setup/claude",
+    setupPhone: "/api/setup/phone",
     appStatus: "/api/app",
     appRestart: "/api/app/restart",
     appQuit: "/api/app/quit",
@@ -217,6 +218,7 @@
     appProcs: {},
     appLoaded: false,
     appTimer: 0,
+    pairTimer: 0,
     setup: null,
     setupAvailable: null,
     tzFilled: false,
@@ -1677,10 +1679,10 @@
     renderProcesses();
   }
 
-  async function loadSetup() {
+  async function loadSetup({ rescan = false } = {}) {
     let data;
     try {
-      data = await api(API.setup);
+      data = await api(rescan ? `${API.setup}?rescan=1` : API.setup);
     } catch (err) {
       // 503: this window runs without the app. 404: a server older than this page.
       if (err instanceof ApiError && (err.status === 503 || err.status === 404)) {
@@ -2025,7 +2027,24 @@
     cancel.type = "button";
     form.append(input, save, cancel);
     li.append(head, el("span", "set-hint", item.purpose), form);
+    if (item.name === "telegram_bot_token") li.append(makePairBlock());
     return li;
+  }
+
+  // A bot with a token and no paired chat ignores everybody; pairing is a
+  // one-time code sent to the bot, shown here once and never kept by the page.
+  function makePairBlock() {
+    const block = el("div", "secret-pair");
+    const start = el("button", "btn btn-quiet pair-start", "Pair my phone");
+    start.type = "button";
+    const forget = el("button", "btn btn-quiet pair-forget", "Unpair");
+    forget.type = "button";
+    const code = el("output", "pair-code");
+    code.hidden = true;
+    const say = el("span", "set-hint pair-say");
+    say.hidden = true;
+    block.append(start, forget, code, say);
+    return block;
   }
 
   function patchSecretRow(li, item) {
@@ -2033,6 +2052,12 @@
     setText(state, item.present ? "stored" : "not set");
     setAttr(state, "data-tone", item.present ? "live" : item.name === "gemini_api_key" ? "warn" : "done");
     setText(li.querySelector(".secret-toggle"), item.present ? "Replace" : "Add");
+    const pair = li.querySelector(".secret-pair");
+    if (pair) {
+      show(pair, item.present);
+      setText(pair.querySelector(".pair-start"), item.paired ? "Pair another phone" : "Pair my phone");
+      show(pair.querySelector(".pair-forget"), item.paired);
+    }
   }
 
   function renderSecrets(present) {
@@ -2041,6 +2066,7 @@
       label: SECRET_INFO[name].label,
       purpose: SECRET_INFO[name].purpose,
       present: present[name] === true,
+      paired: Boolean(app.setup && app.setup.phone && app.setup.phone.paired),
     }));
     syncList(dom.secretList, items, (x) => x.name, makeSecretRow, patchSecretRow);
   }
@@ -2082,6 +2108,34 @@
     if (!li) return;
     if (e.target.closest(".secret-toggle")) openSecretForm(li);
     else if (e.target.closest(".secret-cancel")) closeSecretForm(li);
+    else if (e.target.closest(".pair-start")) pairPhone(li, e.target.closest(".pair-start"));
+    else if (e.target.closest(".pair-forget")) unpairPhone(e.target.closest(".pair-forget"));
+  }
+
+  async function pairPhone(li, button) {
+    const data = await withBusy(button, () => api(API.setupPhone, { action: "pair" }));
+    if (!data || typeof data.code !== "string") return;
+    const code = li.querySelector(".pair-code");
+    const say = li.querySelector(".pair-say");
+    setText(code, data.code);
+    setText(say, appText(data.message, "Send this code to your bot."));
+    show(code, true);
+    show(say, true);
+    // Gone when it expires: a dead code left on screen is one somebody tries.
+    clearTimeout(app.pairTimer);
+    app.pairTimer = setTimeout(() => {
+      setText(code, "");
+      show(code, false);
+      show(say, false);
+      loadSetup().catch(() => {});
+    }, Math.max(1, Number(data.minutes) || 10) * 60000);
+  }
+
+  async function unpairPhone(button) {
+    const data = await withBusy(button, () => api(API.setupPhone, { action: "unpair" }));
+    if (!data) return;
+    toast(appText(data.message, "Unpaired."), { head: "Telegram" });
+    await loadSetup();
   }
 
   async function onSecretSubmit(e) {
@@ -2219,6 +2273,9 @@
   }
 
   function goStep(step) {
+    // A fresh look at the hardware each time the question is asked: the
+    // headset may have been plugged in after the app started.
+    if (step === "mic" && app.ob.step !== "mic") loadSetup({ rescan: true }).catch(() => {});
     app.ob.step = step;
     const at = ONBOARD_STEPS.indexOf(step);
     for (const section of dom.onboard.querySelectorAll(".onboard-step")) {
@@ -2290,7 +2347,7 @@
         ? appText(s.devices_why, "")
         : devices.length
           ? ""
-          : "I can't see a microphone that can also play sound. The system default will do for now.",
+          : "I can't find a microphone that can also play sound. Plug in a headset and press Look again.",
     );
   }
 
@@ -2612,6 +2669,7 @@
     dom.obKey = byId("ob-key");
     dom.obKeyState = byId("ob-key-state");
     dom.obMics = byId("ob-mics");
+    dom.micRescans = [byId("ob-mic-rescan"), byId("set-mic-rescan")];
     dom.obMicWhy = byId("ob-mic-why");
     dom.obAddress = byId("ob-address");
     dom.obName = byId("ob-name");
@@ -2764,6 +2822,9 @@
     dom.obBack.addEventListener("click", obBack);
     dom.obLater.addEventListener("click", closeOnboarding);
     dom.obMics.addEventListener("click", onObMicClick);
+    for (const b of dom.micRescans) {
+      b.addEventListener("click", () => withBusy(b, () => loadSetup({ rescan: true })));
+    }
     dom.obAddress.addEventListener("click", onSegmentClick);
     dom.obUnits.addEventListener("click", onSegmentClick);
     dom.obWakeRetry.addEventListener("click", () => {
