@@ -63,11 +63,11 @@ EXTRAS: tuple[tuple[str, str, str, bool], ...] = (
     ("sounddevice", "voice", "no sound card access", True),
     ("soxr", "voice", "no resampling between 48 kHz and 16 kHz", True),
     ("pywebrtc_audio", "aec", "open speakers cannot barge in; a headset still works", False),
-    # REQUIRED for the desk, not a nicety. Without it `DeskQuestions._say`
-    # raises NoReader and the desk can never read a question aloud — which is
-    # the headline feature. `doctor` used to print this as a warning and then
-    # say the desk was ready.
-    ("edge_tts", "tts", "the desk cannot read a question aloud at all", True),
+    # One rung of the reader's ladder, not a requirement: the OS's own voice
+    # (espeak-ng / say / SAPI) reads exact text with nothing installed. What
+    # the desk requires is SOME deterministic rung, and doctor checks that
+    # directly in its "reader voice" section.
+    ("edge_tts", "tts", "one fewer reader voice (Microsoft's, over the network)", False),
 )
 
 
@@ -281,6 +281,25 @@ def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
     return True, ""
 
 
+def _check_reader(r: Report, cfg: cfgmod.Config | None) -> None:
+    """Blocking only when NO rung can read exact text — the desk refuses then too."""
+    r.section("reader voice")
+    if cfg is None:
+        return
+    ladder = reader_engines(cfg)
+    for e in ladder:
+        trust = (
+            "reads exact text" if (e.deterministic or e.verified) else "everything but exact text"
+        )
+        r.add(OK, f"{e.name:8} {trust}")
+    if not any(e.deterministic or e.verified for e in ladder):
+        r.add(
+            BAD,
+            "nothing can read an option word for word — `sudo apt install espeak-ng` "
+            "(macOS/Windows have a voice built in)",
+        )
+
+
 def _check_location(r: Report, cfg: cfgmod.Config | None) -> None:
     """Never blocking: weather for a NAMED place works with none of this."""
     import datetime as _dt
@@ -401,6 +420,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check_claude_cli(r)
     audio_ok, audio_why = _check_audio(r, cfg)
     _check_location(r, cfg)
+    _check_reader(r, cfg)
     _check_tool_surface(r)
     _readiness(r, cfg, audio_ok, audio_why)
 
@@ -834,6 +854,53 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+# ───────────────────────────── say ─────────────────────────────
+
+
+def cmd_say(args: argparse.Namespace) -> int:
+    """Speak a sentence with the reader's ladder — to the speakers, or to a WAV file."""
+    import asyncio
+    import wave
+
+    from jarvis.voice.engines import RATE
+    from jarvis.voice.verbatim import NoVerbatimEngine, VerbatimSpeaker
+
+    cfg = cfgmod.load(args.config)
+    ladder = [e for e in reader_engines(cfg) if not args.engine or e.name == args.engine]
+    if not ladder:
+        print(
+            f"no reader voice{f' called {args.engine!r}' if args.engine else ''} here",
+            file=sys.stderr,
+        )
+        return 2
+    text = " ".join(args.text)
+    try:
+        pcm = asyncio.run(
+            VerbatimSpeaker(engines=tuple(ladder)).pcm_for(text, args.lang, exact=args.exact)
+        )
+    except NoVerbatimEngine as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if args.out:
+        with wave.open(args.out, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(RATE)
+            w.writeframes(pcm)
+        print(f"wrote {args.out} ({len(pcm) / (RATE * 2):.1f}s)")
+        return 0
+    try:
+        import numpy as np
+        import sounddevice as sd
+
+        sd.play(np.frombuffer(pcm, dtype="<i2"), RATE)
+        sd.wait()
+    except Exception as exc:  # noqa: BLE001 - no PortAudio, no device: say where to look instead
+        print(f"couldn't play it ({exc}); use --out speech.wav", file=sys.stderr)
+        return 1
+    return 0
+
+
 # ───────────────────────────── geo and weather ─────────────────────────────
 
 
@@ -1032,36 +1099,61 @@ class Desk:
     reader: Any | None
 
 
-def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any | None:
-    """The deterministic reader, or None with the reason already printed.
+def reader_engines(cfg: cfgmod.Config) -> list[Any]:
+    """The reader's ladder, in ``voice.reader_order``, keeping only rungs that can run.
 
-    Returning None is a supported state, not a degraded one: :class:`LiveTools`
-    hands the sentence to the model instead and says so in the response. What is
-    lost is the audible "these are somebody else's exact words" marker, which is
-    worth saying out loud at startup rather than discovering during a read-back.
+    Wiring only: which engine may read EXACT text is decided by each engine's
+    own ``deterministic``/``verified`` flags and enforced by VerbatimSpeaker,
+    not here.
+    """
+    from jarvis.voice import engines as eng
+
+    built: list[Any] = []
+    for rung in cfg.voice.reader_order:
+        if rung == "kokoro" and _installed("kokoro"):
+            built.append(eng.KokoroEngine())
+        elif rung == "edge" and _installed("edge_tts"):
+            built.append(
+                eng.EdgeEngine(
+                    voices={"en": cfg.voice.reader_voice, "tr": cfg.voice.reader_voice_tr}
+                )
+            )
+        elif rung == "system" and eng._which_system_tts() is not None:
+            built.append(eng.SystemEngine())
+        elif rung == "gemini" and _installed("google.genai"):
+            key = secrets.get("gemini_api_key")
+            if key:
+                built.append(
+                    eng.GeminiTtsEngine(
+                        api_key=key, model=cfg.voice.tts_model, voice=cfg.voice.tts_voice
+                    )
+                )
+    return built
+
+
+def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any:
+    """The reader voice. Refuses to start without a rung that can read EXACT text.
+
+    A desk with no deterministic reader can hold a conversation but can never
+    present a question — its options are an answer key, and only a voice with no
+    language model in the path may say them. It would find that out at the worst
+    moment, with a build parked and the user waiting, so it is said at startup.
     """
     from jarvis.audio.mixer import Prio
     from jarvis.voice.cache import PcmCache
-    from jarvis.voice.engines import EdgeEngine
     from jarvis.voice.router import TrackSink
     from jarvis.voice.verbatim import VerbatimSpeaker
 
-    if not _installed("edge_tts"):
-        # Refused rather than degraded. A desk with no reader can hold a
-        # conversation but can never present a question, and it would find that
-        # out at the worst moment — with a build parked and the user waiting.
+    ladder = reader_engines(cfg)
+    if not any(e.deterministic or e.verified for e in ladder):
         raise StartupRefused(
-            "no reader voice, so the desk could never read a question aloud — which is "
-            "what it is for. Install it: pip install -e '.[tts]'"
+            "no reader voice that can read a question word for word. The simplest is your "
+            "system's own: `sudo apt install espeak-ng` on Linux (macOS and Windows have one "
+            "built in). Or `pip install -e '.[tts]'` for Microsoft's voices."
         )
+    print(f"{OK}  reader voice: {' -> '.join(e.name for e in ladder)}")
     track = mixer.track("verbatim", Prio.VERBATIM, content_rate=24_000)
-    return VerbatimSpeaker(
-        engines=(
-            EdgeEngine(voices={"en": cfg.voice.reader_voice, "tr": cfg.voice.reader_voice_tr}),
-        ),
-        cache=PcmCache(),
-        sink=TrackSink(track),
-    )
+    return VerbatimSpeaker(engines=tuple(ladder), cache=PcmCache(), sink=TrackSink(track))
 
 
 def _build_desk(args: argparse.Namespace) -> Desk:
@@ -1339,6 +1431,14 @@ def build_parser() -> argparse.ArgumentParser:
     a.add_argument("picks", nargs="*", type=int, help="the option numbers you were read")
     a.add_argument("--text", default=None, help="'none of these' — your own words")
     a.set_defaults(fn=cmd_answer)
+
+    sy = sub.add_parser("say", help="speak a sentence with the reader voice")
+    sy.add_argument("text", nargs="+")
+    sy.add_argument("--lang", default="en")
+    sy.add_argument("--engine", default=None, help="kokoro|edge|system|gemini")
+    sy.add_argument("--exact", action="store_true", help="only voices trusted with exact text")
+    sy.add_argument("--out", default=None, help="write a WAV file instead of playing")
+    sy.set_defaults(fn=cmd_say)
 
     g = sub.add_parser("geo", help="where Jarvis thinks you are; refresh GeoLite2")
     g.add_argument("action", choices=("where", "update"), nargs="?", default="where")

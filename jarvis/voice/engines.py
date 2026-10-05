@@ -43,19 +43,25 @@ __all__ = [
     "DEFAULT_EDGE_VOICES",
     "RATE",
     "SAMPLE_WIDTH",
+    "DEFAULT_SYSTEM_VOICES",
     "EdgeEngine",
     "Engine",
     "EngineFailed",
     "EngineUnavailable",
     "FakeEngine",
+    "GEMINI_TTS_MODEL",
+    "GeminiTtsEngine",
     "KokoroEngine",
+    "SystemEngine",
     "base_lang",
     "float32_to_pcm16",
     "ms_to_samples",
     "pcm_duration_ms",
     "silence",
+    "to_24k",
     "tone",
     "validate_pcm",
+    "wav_to_pcm",
 ]
 
 RATE = 24_000
@@ -374,3 +380,265 @@ def _kokoro_pipeline(text: str, voice: str) -> Iterable[Sequence[float]]:
         return [audio for _, _, audio in pipeline(text, voice=voice)]
     except Exception as exc:
         raise EngineFailed(f"kokoro failed for {voice}: {exc}") from exc
+
+
+# ───────────────────────────── built-in: the OS's own voice ─────────────────────────────
+
+
+def wav_to_pcm(wav: bytes) -> tuple[bytes, int]:
+    """(PCM16 mono bytes, sample rate) from a RIFF/WAVE blob. Trusts the bytes, not the header.
+
+    A streaming writer — espeak-ng on stdout, for one — does not know the length
+    when it writes the header, so it puts 0x7FFFF... in both size fields. The
+    stdlib ``wave`` module believes them and reports a billion frames. Here the
+    data chunk runs to whatever actually arrived.
+    """
+    if len(wav) < 12 or wav[:4] != b"RIFF" or wav[8:12] != b"WAVE":
+        raise EngineFailed("not a WAV file")
+    pos, rate, channels, bits = 12, 0, 0, 0
+    while pos + 8 <= len(wav):
+        cid = wav[pos : pos + 4]
+        size = int.from_bytes(wav[pos + 4 : pos + 8], "little")
+        body = pos + 8
+        if cid == b"fmt ":
+            fmt = int.from_bytes(wav[body : body + 2], "little")
+            channels = int.from_bytes(wav[body + 2 : body + 4], "little")
+            rate = int.from_bytes(wav[body + 4 : body + 8], "little")
+            bits = int.from_bytes(wav[body + 14 : body + 16], "little")
+            if fmt not in (1, 0xFFFE):
+                raise EngineFailed(f"WAV format {fmt} is not PCM")
+        elif cid == b"data":
+            end = min(len(wav), body + size)
+            data = wav[body:end]
+            if bits != 16:
+                raise EngineFailed(f"{bits}-bit WAV, expected 16")
+            if channels == 2:
+                pcm = array.array("h", data[: len(data) // 4 * 4])
+                data = array.array("h", pcm[0::2]).tobytes()
+            elif channels != 1:
+                raise EngineFailed(f"{channels}-channel WAV")
+            return data[: len(data) // 2 * 2], rate
+        pos = body + size + (size & 1)
+    raise EngineFailed("WAV has no data chunk")
+
+
+def to_24k(pcm: bytes, rate: int) -> bytes:
+    """Linear-interpolate PCM16 mono to 24 kHz. ONCE, at synthesis, inside the engine.
+
+    The module rule — no resampler on the desk path — is about the mixed output
+    stream. This runs when a clip is made, before the cache, so the desk path
+    still only ever sees 24 kHz. Linear is enough for this: upsampling 22.05k to
+    24k cannot alias, and the voices that need it are not hi-fi to begin with.
+    """
+    if rate == RATE or not pcm:
+        return pcm
+    src = array.array("h", pcm)
+    n_out = int(len(src) * RATE / rate)
+    out = array.array("h", bytes(n_out * SAMPLE_WIDTH))
+    step = rate / RATE
+    last = len(src) - 1
+    for i in range(n_out):
+        x = i * step
+        j = int(x)
+        if j >= last:
+            out[i] = src[last]
+            continue
+        frac = x - j
+        out[i] = int(src[j] + (src[j + 1] - src[j]) * frac)
+    return out.tobytes()
+
+
+#: The OS voices, per language. espeak-ng names its voices by locale.
+DEFAULT_SYSTEM_VOICES: Mapping[str, str] = {"en": "en-gb", "tr": "tr"}
+
+
+def _which_system_tts() -> str | None:
+    """espeak-ng, espeak, macOS `say` or Windows PowerShell — whichever this OS has."""
+    for name in ("espeak-ng", "espeak", "say"):
+        if shutil.which(name):
+            return name
+    if shutil.which("powershell") or shutil.which("pwsh"):
+        return "sapi"
+    return None
+
+
+#: Windows SAPI via PowerShell. The text arrives through an ENVIRONMENT VARIABLE,
+#: never through the command line: interpolating a sentence into a PowerShell
+#: script is a code-injection bug the first time somebody dictates a semicolon.
+_SAPI_SCRIPT = (
+    "Add-Type -AssemblyName System.Speech;"
+    "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer;"
+    "$f = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo("
+    "24000, [System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen,"
+    " [System.Speech.AudioFormat.AudioChannel]::Mono);"
+    "$s.SetOutputToWaveFile($env:JARVIS_TTS_OUT, $f);"
+    "$s.Speak($env:JARVIS_TTS_TEXT); $s.Dispose()"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SystemEngine:
+    """The operating system's own speech synthesiser. Nothing to download, no network.
+
+    Linux: espeak-ng (``apt install espeak-ng``). macOS: ``say``, always present.
+    Windows: SAPI through PowerShell, always present. Rule-based synthesis with
+    no language model in the path, so it cannot omit, reorder or invent a word —
+    it is DETERMINISTIC in exactly the sense the exact tier needs, and it is the
+    rung that means the desk can read an option label with nothing installed.
+
+    The text is handed over on STDIN (or an environment variable for SAPI),
+    never as an argument: a label that starts with "-" would otherwise be read
+    as a flag, and one containing a quote would end the string early.
+    """
+
+    name: str = "system"
+    deterministic: bool = True
+    verified: bool = True
+    voices: Mapping[str, str] = field(default_factory=lambda: dict(DEFAULT_SYSTEM_VOICES))
+    binary: str | None = None
+    run: Callable[..., subprocess.CompletedProcess[bytes]] = subprocess.run
+
+    def _binary(self) -> str:
+        found = self.binary or _which_system_tts()
+        if found is None:
+            raise EngineUnavailable(
+                "no system voice: install espeak-ng (Linux), or use macOS/Windows"
+            )
+        return found
+
+    def voice_for(self, lang: str) -> str:
+        base = base_lang(lang)
+        binary = self._binary()
+        if binary in ("say", "sapi"):
+            # Their default voice follows the OS language; asking for a named
+            # one that is not installed fails, so English is the only promise.
+            if base != "en":
+                raise EngineUnavailable(f"{binary} is only trusted for English here")
+            return "default"
+        try:
+            return self.voices[base]
+        except KeyError:
+            raise EngineUnavailable(f"no system voice configured for {lang!r}") from None
+
+    def synth(self, text: str, lang: str) -> bytes:
+        voice = self.voice_for(lang)
+        binary = self._binary()
+        if binary in ("espeak-ng", "espeak"):
+            proc = self.run(
+                [binary, "--stdin", "--stdout", "-v", voice, "-s", "165"],
+                input=text.encode("utf-8"),
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+            if proc.returncode != 0 or not proc.stdout:
+                raise EngineFailed(f"{binary} failed: {proc.stderr.decode(errors='replace')[:200]}")
+            pcm, rate = wav_to_pcm(proc.stdout)
+            return validate_pcm(self.name, to_24k(pcm, rate))
+        return self._via_file(binary, text)
+
+    def _via_file(self, binary: str, text: str) -> bytes:
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out = os.path.join(tmp, "speech.wav")
+            if binary == "say":
+                proc = self.run(
+                    ["say", "-o", out, "--data-format=LEI16@24000", "-f", "-"],
+                    input=text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+            else:
+                shell = shutil.which("powershell") or shutil.which("pwsh") or "powershell"
+                proc = self.run(
+                    [shell, "-NoProfile", "-NonInteractive", "-Command", _SAPI_SCRIPT],
+                    env={**os.environ, "JARVIS_TTS_TEXT": text, "JARVIS_TTS_OUT": out},
+                    capture_output=True,
+                    timeout=30,
+                    check=False,
+                )
+            if proc.returncode != 0 or not os.path.exists(out):
+                raise EngineFailed(f"{binary} failed: {proc.stderr.decode(errors='replace')[:200]}")
+            with open(out, "rb") as fh:
+                pcm, rate = wav_to_pcm(fh.read())
+        return validate_pcm(self.name, to_24k(pcm, rate))
+
+
+# ───────────────────────────── Gemini TTS ─────────────────────────────
+
+#: From google-genai 2.23.0's own test suite. READ, not measured.
+GEMINI_TTS_MODEL = "gemini-2.5-flash-preview-tts"
+
+
+@dataclass(frozen=True, slots=True)
+class GeminiTtsEngine:
+    """Gemini's speech model: the same key as the conversation, natural, 24 kHz.
+
+    NOT DETERMINISTIC, and so never trusted with EXACT text. It is a generative
+    voice — it reads, but it is the kind of reader that can smooth a word or
+    drop one — and ``VerbatimSpeaker`` bars it from answer keys until
+    ``tools/fidelity_probe.py`` has measured it. For everything else it is the
+    best-sounding rung most installs will have, with nothing extra to install.
+
+    ``google.genai`` is imported inside :meth:`synth`; the key is a parameter.
+    """
+
+    api_key: str
+    model: str = GEMINI_TTS_MODEL
+    voice: str = "Kore"
+    name: str = "gemini"
+    deterministic: bool = False
+    verified: bool = False
+    client: object | None = None
+
+    def voice_for(self, lang: str) -> str:
+        return self.voice
+
+    def synth(self, text: str, lang: str) -> bytes:
+        client = self.client
+        if client is None:
+            if not self.api_key:
+                raise EngineUnavailable("no Gemini key for speech")
+            try:
+                from google import genai  # noqa: PLC0415 - optional, lazy
+            except ImportError as exc:
+                raise EngineUnavailable("google-genai is not installed") from exc
+            client = genai.Client(api_key=self.api_key)
+        try:
+            reply = client.models.generate_content(  # type: ignore[attr-defined]
+                model=self.model,
+                contents=text,
+                config={
+                    "response_modalities": ["AUDIO"],
+                    "speech_config": {
+                        "voice_config": {"prebuilt_voice_config": {"voice_name": self.voice}}
+                    },
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 - every SDK failure means "next rung"
+            raise EngineFailed(f"{self.name}: {type(exc).__name__}: {exc}") from exc
+        blob = None
+        for cand in getattr(reply, "candidates", None) or ():
+            for part in getattr(getattr(cand, "content", None), "parts", None) or ():
+                if getattr(part, "inline_data", None) is not None:
+                    blob = part.inline_data
+                    break
+            if blob is not None:
+                break
+        if blob is None or not getattr(blob, "data", None):
+            raise EngineFailed(f"{self.name} returned no audio")
+        data = bytes(blob.data)
+        mime = str(getattr(blob, "mime_type", "") or "")
+        if data[:4] == b"RIFF":
+            pcm, rate = wav_to_pcm(data)
+        else:
+            # "audio/L16;codec=pcm;rate=24000" — raw little-endian PCM16.
+            rate = RATE
+            for piece in mime.split(";"):
+                if piece.strip().startswith("rate="):
+                    rate = int(piece.split("=", 1)[1])
+            pcm = data
+        return validate_pcm(self.name, to_24k(pcm, rate))

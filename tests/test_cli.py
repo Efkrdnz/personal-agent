@@ -203,21 +203,54 @@ def test_desk_refuses_with_instructions_rather_than_a_traceback(
     assert "python -m jarvis secrets set gemini_api_key" in err
 
 
-def test_the_desk_will_not_start_without_a_reader_voice(
+def test_the_desk_will_not_start_without_a_voice_that_can_read_exact_text(
     workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A desk that cannot read a question aloud cannot do the thing it is for.
+    """A desk that cannot read an option word for word cannot do the thing it is for.
 
-    It used to start anyway and find out at the worst moment — a build parked on
-    a read-back, the user waiting, and `DeskQuestions._say` raising NoReader into
-    a background task nobody is watching.
+    What it needs is not a particular package but a DETERMINISTIC rung: Gemini's
+    voice alone is not enough, because a generative voice may not read an
+    answer key. The refusal names the cheapest fix — the OS's own voice.
     """
+    from jarvis.voice import engines as eng
+
     monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
-    monkeypatch.setattr(cli, "_installed", lambda module: module != "edge_tts")
+    monkeypatch.setattr(cli, "_installed", lambda module: module not in ("edge_tts", "kokoro"))
+    monkeypatch.setattr(eng, "_which_system_tts", lambda: None)
+    import jarvis.audio.devices as dev
+
+    class OneHeadset:
+        def devices(self):  # noqa: ANN202
+            return [dev.DeviceInfo(0, "Jabra", "ALSA", 1, 2, 48000.0)]
+
+        def defaults(self):  # noqa: ANN202
+            return (0, 0)
+
+    import jarvis.audio.legs as legs
+
+    # Patched where it is USED: legs.py binds PortAudioProbe by name at import,
+    # so patching only the defining module works or not depending on which test
+    # happened to import legs first.
+    monkeypatch.setattr(dev, "PortAudioProbe", OneHeadset)
+    monkeypatch.setattr(legs, "PortAudioProbe", OneHeadset)
     assert run(["desk"], workspace / "j.db") == 2
     err = capsys.readouterr().err
-    assert "edge_tts" in err
-    assert "tts" in err and "pip install" in err
+    assert "word for word" in err
+    assert "espeak-ng" in err
+
+
+def test_gemini_alone_is_listed_but_does_not_satisfy_the_reader_check(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from jarvis.voice import engines as eng
+
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
+    monkeypatch.setattr(cli, "_installed", lambda module: module not in ("edge_tts", "kokoro"))
+    monkeypatch.setattr(eng, "_which_system_tts", lambda: None)
+    run(["doctor"], workspace / "j.db")
+    section = capsys.readouterr().out.split("── reader voice")[1].split("\n\n")[0]
+    assert "gemini" in section and "everything but exact text" in section
+    assert "MISSING" in section
 
 
 def test_desk_names_the_missing_packages_when_there_are_any(
