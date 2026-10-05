@@ -19,8 +19,6 @@ ROOT = Path(__file__).resolve().parents[1] / "jarvis"
 ALLOWED = {
     # Linux/macOS probe binaries (gdbus, loginctl, ioreg); none exists on Windows.
     ("presence.py", "_run"): "never runs on Windows",
-    # grim/maim/import screenshot tools: X11 and Wayland only.
-    ("capture/backends.py", "_run_capture"): "never runs on Windows",
     # `run` and `build` are terminal commands: the runner inherits that console
     # on purpose, so the user sees its refusals.
     ("__main__.py", "_spawn_runner"): "inherits the terminal it was started from",
