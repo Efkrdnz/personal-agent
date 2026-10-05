@@ -300,6 +300,42 @@ def _check_reader(r: Report, cfg: cfgmod.Config | None) -> None:
         )
 
 
+def _check_hearing(r: Report, cfg: cfgmod.Config | None, db_path: str | None) -> None:
+    """Never blocking: an empty lexicon still transcribes, it just mishears more."""
+    from jarvis import hearing
+
+    r.section("hearing")
+    if cfg is None:
+        return
+    try:
+        con = db.open_db(db_path)
+    except Exception as exc:  # noqa: BLE001 - the database section already said why
+        r.add(WARN, f"could not read the lexicon: {exc}")
+        return
+    try:
+        lex = hearing.lexicon(con, extra_terms=cfg.voice.vocabulary)
+    finally:
+        con.close()
+    fixes = [e for e in lex.entries if e.heard_as]
+    r.add(
+        OK,
+        f"{len(fixes)} word(s) corrected from context ({', '.join(e.term for e in fixes)}); "
+        "`python -m jarvis hearing list` shows them",
+    )
+    if cfg.voice.asr_vocabulary:
+        r.add(
+            OK,
+            f"recogniser biased toward {len(hearing.vocabulary(lex))} phrases — UNVERIFIED on "
+            "the Live server; set voice.asr_vocabulary = false if the desk cannot connect",
+        )
+    r.add(
+        OK if cfg.voice.hearing_arbiter else WARN,
+        "doubtful words go to the text model for a vote"
+        if cfg.voice.hearing_arbiter
+        else "voice.hearing_arbiter = false: doubtful words are left as heard",
+    )
+
+
 def _check_location(r: Report, cfg: cfgmod.Config | None) -> None:
     """Never blocking: weather for a NAMED place works with none of this."""
     import datetime as _dt
@@ -420,6 +456,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check_claude_cli(r)
     audio_ok, audio_why = _check_audio(r, cfg)
     _check_location(r, cfg)
+    _check_hearing(r, cfg, args.db)
     _check_reader(r, cfg)
     _check_tool_surface(r)
     _readiness(r, cfg, audio_ok, audio_why)
@@ -549,6 +586,51 @@ def tool_extra(cfg: cfgmod.Config) -> dict[str, Any]:
         "locator": locator_for(cfg),
         "units": cfg.location.units,
     }
+
+
+def hearing_for(cfg: cfgmod.Config, api_key: str | None = None) -> Any:
+    """The transcript corrector every voice channel hands its tools.
+
+    The lexicon is re-read on every call rather than captured here: a word the
+    user teaches one sentence ago has to be in force for this one, and it was
+    written by a tool call on another connection.
+    """
+    from jarvis import hearing
+
+    arbiter = None
+    if api_key and cfg.voice.hearing_arbiter and _installed("google.genai"):
+        from jarvis.live.text import GeminiArbiter, GeminiText
+
+        arbiter = GeminiArbiter(GeminiText(api_key=api_key, model=cfg.voice.text_model))
+    terms = cfg.voice.vocabulary
+
+    def hear(con: sqlite3.Connection, text: str) -> Any:
+        return hearing.correct(text, hearing.lexicon(con, extra_terms=terms), arbiter=arbiter)
+
+    return hear
+
+
+def heard_profile(cfg: cfgmod.Config, con: sqlite3.Connection, prof: Any) -> Any:
+    """A Live profile that knows this user's mishearings, in its model and its ears.
+
+    Two different listeners: the recogniser gets ``custom_vocabulary`` so it
+    writes "quote" in the first place, and the conversational model, which
+    hears the AUDIO rather than any transcript, gets the same list in words.
+    """
+    from dataclasses import replace
+
+    from jarvis import hearing
+
+    lex = hearing.lexicon(con, extra_terms=cfg.voice.vocabulary)
+    told = hearing.instruction(lex)
+    return replace(
+        prof,
+        model=cfg.voice.model,
+        voice=cfg.voice.gemini_voice,
+        system_instruction="\n".join(x for x in (prof.system_instruction, told) if x),
+        vocabulary=hearing.vocabulary(lex) if cfg.voice.asr_vocabulary else (),
+        language_codes=tuple(cfg.voice.languages),
+    )
 
 
 def cmd_tools(args: argparse.Namespace) -> int:
@@ -959,6 +1041,62 @@ def cmd_weather(args: argparse.Namespace) -> int:
     return 0
 
 
+# ───────────────────────────── hearing ─────────────────────────────
+
+
+def cmd_hearing(args: argparse.Namespace) -> int:
+    """See, teach and test the words Jarvis corrects. The 2am view of the lexicon."""
+    from jarvis import hearing
+
+    cfg = cfgmod.load(args.config)
+    con = db.open_db(args.db)
+    try:
+        if args.action == "list":
+            lex = hearing.lexicon(con, extra_terms=cfg.voice.vocabulary)
+            for e in lex.entries:
+                origin = "taught" if e.taught else ("shipped" if e in hearing.SEED else "config")
+                print(f"{e.spelling or e.term}  ({origin})")
+                if e.heard_as:
+                    print(f"    heard as: {', '.join(e.heard_as)}")
+                learned = lex.learned.get(e.term, ())
+                if learned:
+                    print(f"    learned cues: {', '.join(learned)}")
+                for (h, m), n in sorted(lex.prior.items()):
+                    if m == e.term:
+                        print(f"    history {h} -> {m}: {n:+.1f}")
+            return 0
+        if args.action == "test":
+            sentence = " ".join(args.words)
+            if not sentence:
+                print("give a sentence: python -m jarvis hearing test get me a stock coat")
+                return 2
+            out = hearing_for(cfg)(con, sentence)
+            print(out.text)
+            for f in out.fixes:
+                verdict = "changed" if f.applied else "left"
+                print(f"  {verdict} {f.heard!r} -> {f.meant!r}  score {f.score:+.1f}  ({f.by})")
+                if f.why:
+                    print(f"      because: {', '.join(f.why)}")
+            return 0
+        if args.action == "teach":
+            if len(args.words) != 2:
+                print("usage: python -m jarvis hearing teach <heard> <meant>  (teach coat quote)")
+                return 2
+            entry = hearing.teach(con, args.words[0], args.words[1], actor="cli")
+            print(f"{OK}  {', '.join(entry.heard_as)} -> {entry.term}")
+            return 0
+        if args.action == "forget":
+            term = " ".join(args.words)
+            if hearing.forget(con, term):
+                print(f"{OK}  forgot what you taught about {term!r}")
+            else:
+                print(f"nothing taught about {term!r}")
+            return 0
+    finally:
+        con.close()
+    return 2
+
+
 # ───────────────────────────── build ─────────────────────────────
 
 
@@ -1189,6 +1327,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     con = db.open_db(args.db)
     try:
         reconcile.reconcile(con, actor="desk")
+        profile: SessionProfile = heard_profile(cfg, con, DESK)
     finally:
         con.close()
 
@@ -1252,13 +1391,10 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         questions=questions,
         speak=(lambda utt: reader.speak(utt)) if reader is not None else None,
         extra=tool_extra(cfg),
+        hearing=hearing_for(cfg, key),
     )
-
-    profile: SessionProfile = DESK
-    if cfg.voice.model != profile.model or cfg.voice.gemini_voice != profile.voice:
-        from dataclasses import replace
-
-        profile = replace(profile, model=cfg.voice.model, voice=cfg.voice.gemini_voice)
+    if profile.vocabulary:
+        print(f"{OK}  listening for: {', '.join(profile.vocabulary[-6:])}")
 
     session = LiveSession(
         profile,
@@ -1448,6 +1584,11 @@ def build_parser() -> argparse.ArgumentParser:
     w.add_argument("place", nargs="*", help="a place; empty for here")
     w.add_argument("--when", default="now", choices=("now", "today", "tomorrow", "week"))
     w.set_defaults(fn=cmd_weather)
+
+    h = sub.add_parser("hearing", help="the words Jarvis corrects when it mishears you")
+    h.add_argument("action", choices=("list", "test", "teach", "forget"))
+    h.add_argument("words", nargs="*", help="test: a sentence; teach: <heard> <meant>")
+    h.set_defaults(fn=cmd_hearing)
 
     sub.add_parser("desk", help="listen, talk, and drive Claude Code").set_defaults(fn=cmd_desk)
     return p

@@ -41,9 +41,11 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from jarvis import requests as rq
+from jarvis.hearing import Heard
 from jarvis.live.profiles import SessionProfile
 from jarvis.live.session import ToolCall, ToolResult
 from jarvis.tools.builtin.answer import OPEN_QUESTION
+from jarvis.tools.builtin.hearing import HEARD, TRANSCRIPT_RAW
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Registry
 from jarvis.voice.router import Fidelity, NoReader, Utterance
@@ -127,6 +129,10 @@ class LiveTools:
     #: Extra values every handler should see in ``ctx.extra`` (the spend ceiling,
     #: say). Merged UNDER the transcript, which this object owns.
     extra: dict[str, Any] = field(default_factory=dict)
+    #: Turns the raw transcript into what the user SAID: see
+    #: :mod:`jarvis.hearing`. Takes the tool call's own connection, so a word
+    #: taught one sentence ago is in force for this one.
+    hearing: Callable[[sqlite3.Connection, str], Heard] | None = None
     calls: int = 0
 
     # ── the two permission tables ────────────────────────────────────────
@@ -173,7 +179,17 @@ class LiveTools:
     def _ctx(self, con: sqlite3.Connection) -> ToolCtx:
         extra = dict(self.extra)
         if self.transcript is not None:
-            extra["transcript"] = self.transcript.words()
+            words = self.transcript.words()
+            extra[TRANSCRIPT_RAW] = words
+            extra["transcript"] = words
+            if self.hearing is not None and words:
+                try:
+                    heard = self.hearing(con, words)
+                except Exception:  # noqa: BLE001 - a broken lexicon must not cost the request
+                    heard = None
+                if heard is not None:
+                    extra["transcript"] = heard.text
+                    extra[HEARD] = heard
         if self.questions is not None and self.questions.current:
             # What "the second one" refers to. Read fresh every call: the desk
             # may have read a newer question since the model decided to answer.

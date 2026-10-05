@@ -25,7 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-__all__ = ["TEXT_MODEL", "GeminiText", "TextCallFailed"]
+__all__ = ["TEXT_MODEL", "GeminiArbiter", "GeminiText", "TextCallFailed"]
 
 #: The text model for tidying. Deliberately NOT ``jarvis.live.MODEL``: that is the
 #: LIVE model, a duplex audio endpoint, and asking it for a JSON document is
@@ -107,3 +107,29 @@ class GeminiText:
                     break
             raise TextCallFailed(f"the model returned no text{reason}")
         return str(text)
+
+
+@dataclass
+class GeminiArbiter:
+    """A :data:`jarvis.hearing.Arbiter`: "coat" or "quote", given the sentence?
+
+    Only ever a VOTE between the two words on the table. The reply is matched
+    against exactly those two; anything else — a third word, a sentence, an
+    error — leaves the transcript as heard. A model allowed to rewrite the
+    user's words would be a paraphraser sitting upstream of the contract.
+    """
+
+    ask: Any  # a GeminiText, or anything with its call shape
+
+    def __call__(self, sentence: str, heard: str, meant: str) -> bool:
+        prompt = (
+            "A speech recogniser transcribed this sentence from a speaker with an accent:\n"
+            f"  {sentence}\n"
+            f"The word '{heard}' may be a mishearing of '{meant}'. Which word did the "
+            f"speaker most likely say? Reply with exactly one word: {heard} or {meant}."
+        )
+        try:
+            reply = str(self.ask(prompt)).strip().strip(".'\"").lower()
+        except TextCallFailed:
+            return False
+        return reply == meant.lower()

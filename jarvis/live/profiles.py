@@ -143,6 +143,19 @@ class SessionProfile:
     #: is how a detector hit on Jarvis reading a GitHub issue aloud gets thrown
     #: away instead of halting the system.
     output_transcription: bool = True
+    #: Phrases the input recogniser is biased toward (``custom_vocabulary``):
+    #: the words this user says that a general recogniser gets wrong. Built
+    #: from :func:`jarvis.hearing.vocabulary` at the composition root.
+    #:
+    #: READ FROM THE SDK, NOT MEASURED. google-genai 2.23's
+    #: ``AudioTranscriptionConfig`` carries the field and its Live converter
+    #: passes it through to the Gemini API untouched; whether the Live server
+    #: honours it has not been confirmed from here. ``voice.asr_vocabulary =
+    #: false`` turns it off if a connection is refused over it.
+    vocabulary: tuple[str, ...] = ()
+    #: BCP-47 hints for the input recogniser. Empty means auto-detect, which is
+    #: right for someone who switches languages mid-sentence.
+    language_codes: tuple[str, ...] = ()
     #: Whether ``FunctionResponseScheduling.SILENT`` is known to keep this model
     #: quiet. UNVERIFIED on 3.8, so the documented fallback (send the option
     #: table as a client-content prefill before unmuting) is armed alongside it.
@@ -255,6 +268,8 @@ DESK = SessionProfile(
         "weather",
         "where_am_i",
         "local_time",
+        "correct_hearing",
+        "wrong_correction",
     ),
 )
 
@@ -278,6 +293,8 @@ PHONE_USER = SessionProfile(
         "weather",
         "where_am_i",
         "local_time",
+        "correct_hearing",
+        "wrong_correction",
     ),
 )
 
@@ -384,7 +401,13 @@ def live_connect_config(
             automatic_activity_detection=detection,
             activity_handling=prof.activity_handling,
         ),
-        input_audio_transcription=t.AudioTranscriptionConfig()
+        # VERBATIM (the default mode), never SMART: SMART rewrites grammar and
+        # drops self-corrections, and the transcript is the contract a build is
+        # held to. Mishearings are corrected downstream, where they are recorded.
+        input_audio_transcription=t.AudioTranscriptionConfig(
+            custom_vocabulary=list(prof.vocabulary) or None,
+            language_codes=list(prof.language_codes) or None,
+        )
         if prof.input_transcription
         else None,
         output_audio_transcription=(

@@ -86,6 +86,14 @@ class Voice:
     #: Words YOU say that recognisers get wrong: names, jargon, project names.
     #: They are taught to the live model and to the transcript corrector.
     vocabulary: tuple[str, ...] = ()
+    #: Hand the vocabulary to the Live recogniser as ``custom_vocabulary``. On
+    #: by default; see SessionProfile.vocabulary for why it is a switch.
+    asr_vocabulary: bool = True
+    #: BCP-47 hints for the recogniser, e.g. ["en-US", "tr-TR"]. Empty = auto.
+    languages: tuple[str, ...] = ()
+    #: Ask the text model to settle a word the evidence leaves split ("coat" or
+    #: "quote"?). One short call, only for doubtful words, only ever a vote.
+    hearing_arbiter: bool = True
     #: The deterministic reader that speaks load-bearing text. Deliberately a
     #: DIFFERENT voice: "when the other voice speaks, those are somebody else's
     #: exact words" is an audible integrity marker, not a rough edge.
@@ -268,6 +276,9 @@ assume_headset = true    # run tools/aec_bench.py before trusting open speakers
 web_search = true
 # Words recognisers get wrong when YOU say them: names, jargon, project names.
 vocabulary = ["quote", "Jarvis", "Claude Code"]
+asr_vocabulary = true
+# languages = ["en-US", "tr-TR"]
+hearing_arbiter = true
 
 [location]
 # Leave empty to locate by IP with GeoLite2 (approximate, and said to be).

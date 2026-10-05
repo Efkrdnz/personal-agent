@@ -33,6 +33,7 @@ from jarvis import jobs, spec
 from jarvis.bus import publish
 from jarvis.ids import dedupe_key
 from jarvis.project.mode import resolve as resolve_mode
+from jarvis.tools.builtin.hearing import HEARD
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Tool, ToolError
 
@@ -85,6 +86,19 @@ def _transcript_of(ctx: ToolCtx) -> str:
     if not text:
         raise NoTranscript()
     return text
+
+
+def _corrections(ctx: ToolCtx) -> dict[str, object]:
+    """Which words of the contract were corrected from what the recogniser wrote.
+
+    The contract is the CORRECTED transcript — "stock quote widget", not "stock
+    coat widget" — so the read-back is what the user meant. The swaps go on the
+    record beside it, so a build that came out wrong can be traced to a
+    correction rather than to the user.
+    """
+    heard = ctx.extra.get(HEARD)
+    swaps = [[f.heard, f.meant] for f in getattr(heard, "applied", ())]
+    return {"corrected": swaps} if swaps else {}
 
 
 def _title_for(project_name: str, summary: str, transcript: str) -> str:
@@ -160,6 +174,7 @@ def code_build(ctx: ToolCtx, project_name: str = "", summary: str = "") -> str:
             "effort": effort_ask.level,
             "effort_phrase": effort_ask.phrase,
             "spoken_name": " ".join(str(project_name or "").split()) or None,
+            **_corrections(ctx),
         },
         job_id=job.id,
         idem_key=f"project:{dedupe_key(job.id, 'requested', transcript)}",

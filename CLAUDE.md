@@ -79,7 +79,7 @@ Full versions in [`CONTRIBUTING.md`](CONTRIBUTING.md). The short form:
 3. **Assume the reader is another process, started after you died.** Functions take an open
    `sqlite3.Connection` first and never open one. No module-level mutable state. Races get a test with two
    real connections.
-4. **The spine is standard-library only.** `jarvis/{db,ids,clock,bus,requests,jobs,reconcile,effects,presence,kill,ledger,answers}.py`
+4. **The spine is standard-library only.** `jarvis/{db,ids,clock,bus,requests,jobs,reconcile,effects,presence,kill,ledger,answers,hearing}.py`
    must import under `python -S`. `jarvis/cc/` and the voice layer add their own deps behind extras.
 5. **Comments say why, never what.**
 6. **`jarvis/migrations/*.sql` is frozen.** Add a new numbered migration; never edit an applied one.
@@ -92,6 +92,7 @@ Full versions in [`CONTRIBUTING.md`](CONTRIBUTING.md). The short form:
 jarvis/           the spine — one SQLite file, several processes, stdlib only
   requests.py     THE unified gate: every human decision is one row, one lifecycle
   answers.py      the AskUserQuestion payload and answer shapes, for every channel
+  hearing.py      "coat" -> "quote" when the context says so; learns from "no, I said quote"
   bus.py          the event bus, which is also the hash-chained activity log
   jobs.py         jobs outlive the process that started them
   effects.py      undo as three honest classes, decided before execution
