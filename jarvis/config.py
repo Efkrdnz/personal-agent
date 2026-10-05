@@ -99,7 +99,17 @@ class Voice:
     #: exact words" is an audible integrity marker, not a rough edge.
     reader_voice: str = "en-GB-SoniaNeural"
     reader_voice_tr: str = "tr-TR-AhmetNeural"
+    #: The desk sleeps until it hears this. "" listens all the time, which
+    #: is what the desk did before it had a wake word. See jarvis/audio/wake.py.
     wake_word: str = "hey_jarvis"
+    #: 0.5 is openWakeWord's own default. Lower hears you from further away
+    #: and wakes for the television more often; `python -m jarvis wake test`
+    #: prints the score a phrase gets, so this is tuned by measuring.
+    wake_threshold: float = 0.5
+    #: How long the desk keeps listening after the last thing anyone said.
+    wake_window_s: float = 20.0
+    #: A soft blip when it wakes, so you know it heard you.
+    wake_chime: bool = True
     #: Open speakers are the upgrade AEC buys, not the baseline it must deliver.
     #: tools/aec_bench.py decides this with a pass/fail rule fixed in advance.
     assume_headset: bool = True
@@ -279,6 +289,10 @@ vocabulary = ["quote", "Jarvis", "Claude Code"]
 asr_vocabulary = true
 # languages = ["en-US", "tr-TR"]
 hearing_arbiter = true
+wake_word = "hey_jarvis"  # "" = always listening; models: python -m jarvis wake download
+wake_threshold = 0.5
+wake_window_s = 20.0
+wake_chime = true
 
 [location]
 # Leave empty to locate by IP with GeoLite2 (approximate, and said to be).

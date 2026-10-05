@@ -34,6 +34,11 @@ secrets = ["keyring>=25"]
 # weather for a NAMED place works without it, and so does a location set in
 # config.toml. Apache-2.0.
 geo = ["maxminddb>=2.6"]
+# The wake word. openWakeWord's MODELS run on onnxruntime directly; the
+# openwakeword PACKAGE is deliberately not a dependency (it imports scipy and
+# scikit-learn, and on Linux requires tflite-runtime, which has no wheels past
+# Python 3.11). See jarvis/audio/wake.py.
+wake = ["onnxruntime>=1.17"]
 dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
 
 [build-system]

@@ -167,9 +167,14 @@ web search, the OS reader voice (espeak-ng/say/SAPI), and hearing correction (`j
 migration 004). The Live recogniser's `custom_vocabulary` is read from the SDK and unverified on the
 server; `voice.asr_vocabulary = false` is the escape hatch.
 
-And the smaller ones: the desk has no wake word, and `DESK.tools` still names `explain_option` and
-`job_control`, which do not exist (`doctor` prints which). `voice.wake_word` and `voice.output_device`
-are config keys nothing reads. Reminders and Telegram both need `python -m jarvis.schedule` running.
+The desk has a wake word: it starts ASLEEP and sends nothing to Gemini until it hears "hey Jarvis"
+(`jarvis/audio/wake.py` — openWakeWord's ONNX models run on onnxruntime directly, because the
+`openwakeword` package drags in scipy/scikit-learn and needs tflite-runtime on Linux). A configured wake
+word with no model is a REFUSAL, never a silent fallback to always-listening. Those pretrained models are
+**CC BY-NC-SA** (non-commercial): they are downloaded at runtime and must NEVER be committed — see
+[ADR 0012](docs/adr/0012-wake-model-is-non-commercial.md). And the smaller ones:
+`DESK.tools` still names `explain_option` and `job_control`, which do not exist (`doctor` prints which).
+`voice.output_device` is a config key nothing reads. Reminders and Telegram both need `python -m jarvis.schedule` running.
 
 See [`docs/roadmap.md`](docs/roadmap.md) for what is next and what was deliberately cut.
 

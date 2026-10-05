@@ -24,7 +24,25 @@ def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(secrets, "_from_keyring", lambda secret: None)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    # Where the wake model lives. Without this the suite's verdict on "can the
+    # desk start" would depend on whether THIS machine ran `wake download`.
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     return tmp_path
+
+
+def install_fake_wake(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A machine that has run `python -m jarvis wake download` and has onnxruntime."""
+    from jarvis.audio import wake
+
+    where = wake.default_model_dir()
+    where.mkdir(parents=True, exist_ok=True)
+    pinned = {}
+    for name in wake.MODELS:
+        (where / name).write_bytes(f"model {name}".encode())
+        pinned[name] = wake._sha256(f"model {name}".encode())
+    monkeypatch.setattr(wake, "MODELS", pinned)
+    real = cli._installed
+    monkeypatch.setattr(cli, "_installed", lambda m: True if m == "onnxruntime" else real(m))
 
 
 def run(argv: list[str], db: Path | None = None) -> int:
@@ -366,11 +384,41 @@ def test_doctor_passes_the_machine_where_desk_can_start(
     monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
     d = _devices()
     use_probe(monkeypatch, [d["headset"]], (0, 0))
+    install_fake_wake(monkeypatch)
 
     assert run(["doctor"], workspace / "j.db") == 0
     out = capsys.readouterr().out
     assert "desk would use: Jabra Evolve2 40" in out
     assert "Nothing blocking" in out
+
+
+def test_doctor_blocks_the_desk_until_the_wake_model_is_downloaded(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
+    d = _devices()
+    use_probe(monkeypatch, [d["headset"]], (0, 0))
+    real = cli._installed
+    monkeypatch.setattr(cli, "_installed", lambda m: True if m == "onnxruntime" else real(m))
+
+    assert run(["doctor"], workspace / "j.db") == 1
+    out = capsys.readouterr().out
+    assert "wake model missing" in out and "python -m jarvis wake download" in out
+    desk_line = next(x for x in out.splitlines() if "python -m jarvis desk " in x)
+    assert "wake download" in desk_line
+
+
+def test_with_no_wake_word_doctor_warns_that_the_desk_always_listens(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("JARVIS_GEMINI_API_KEY", "not-a-real-key")
+    d = _devices()
+    use_probe(monkeypatch, [d["headset"]], (0, 0))
+    cfgfile = workspace / "c.toml"
+    cfgfile.write_text('[voice]\nwake_word = ""\n', encoding="utf-8")
+    code = cli.main(["--db", str(workspace / "j.db"), "--config", str(cfgfile), "doctor"])
+    out = capsys.readouterr().out
+    assert code == 0 and "listens all the time" in out
 
 
 def test_doctor_runs_the_same_device_selection_the_desk_runs(

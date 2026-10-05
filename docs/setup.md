@@ -17,7 +17,7 @@ safe to paste anywhere.
 
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install -e '.[cc,voice,live,tts,geo,secrets,dev]'
+uv pip install -e '.[cc,voice,live,tts,geo,wake,secrets,dev]'
 sudo apt install espeak-ng      # the built-in reader voice (macOS `say` / Windows SAPI need nothing)
 ```
 
@@ -28,6 +28,7 @@ sudo apt install espeak-ng      # the built-in reader voice (macOS `say` / Windo
 | `live` | no voice — Gemini Live is the conversational half |
 | `tts` | one fewer reader voice (Microsoft's, over the network). Not required: the OS voice reads exact text with nothing installed |
 | `geo` | no GeoLite2 lookup, so "where am I" needs `[location] city` in config.toml |
+| `wake` | no wake word; the desk refuses to start unless `voice.wake_word = ""` (always listening) |
 | `secrets` | credentials fall back to environment variables |
 | `aec` | open speakers cannot barge in; a headset still works |
 
@@ -128,9 +129,32 @@ caller between two processes, not a missing feature:
 
 - **Tapping "Now" on the briefing gate composes no briefing.**
   The gate publishes an event nothing listens for.
-- **There is no wake word**: the desk listens from the moment it starts.
 - **The desk does not run the builder itself** — after speaking a build request, run
   `python -m jarvis build` to carry it forward.
+
+## The wake word
+
+The desk starts **asleep**: the microphone is read locally, and nothing is sent to Gemini until it hears
+**"hey Jarvis"**. Then it chimes, and stays awake for `voice.wake_window_s` (20 s) after the last thing
+anyone said, including a question it reads aloud on its own, so you can answer that without the name.
+"Hey Jarvis, what's the weather" works as one sentence.
+
+```bash
+uv pip install -e '.[wake]'                 # onnxruntime
+python -m jarvis wake download              # three small ONNX files, SHA-256 pinned
+python -m jarvis wake test                  # the score your OS voice gets saying "hey jarvis"
+python -m jarvis wake test --wav me.wav     # or a recording of you
+```
+
+`voice.wake_threshold` (0.5) trades distance for false wakes; measure with `wake test` rather than
+guessing. `voice.wake_word = ""` turns it off and the desk listens all the time. A configured wake
+word with no model is a refusal to start, never a quiet fallback to always-listening. Jarvis reading
+"hey Jarvis" aloud from an email does not wake him: the self-speech veto discards it.
+
+**Licence.** openWakeWord's pretrained models are **CC BY-NC-SA 4.0: non-commercial**. Fine for
+your own desk; not for a hosted or paid deployment. They are downloaded to your machine and never
+committed, so this repository stays MIT. [ADR 0012](adr/0012-wake-model-is-non-commercial.md) has the
+reasoning and the ways out.
 
 ## The everyday assistant
 

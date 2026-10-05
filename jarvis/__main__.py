@@ -26,6 +26,7 @@ The commands, in the order somebody new to the machine needs them:
     python -m jarvis geo update     download GeoLite2, for "where am I"
     python -m jarvis remind         the reminders the scheduler will say
     python -m jarvis hearing list   the words Jarvis corrects when it mishears you
+    python -m jarvis wake download  fetch the "hey Jarvis" model; `wake test` to measure
 
 ``doctor`` is the important one. A voice assistant that fails at startup fails
 with no screen and no log the user will find, so the whole of "why won't it
@@ -74,6 +75,10 @@ EXTRAS: tuple[tuple[str, str, str, bool], ...] = (
     # the desk requires is SOME deterministic rung, and doctor checks that
     # directly in its "reader voice" section.
     ("edge_tts", "tts", "one fewer reader voice (Microsoft's, over the network)", False),
+    # Not required in the table: with voice.wake_word = "" the desk listens
+    # all the time and needs no model. When a wake word IS configured the desk
+    # refuses to start without it, and doctor's "wake word" section says why.
+    ("onnxruntime", "wake", "no wake word — the desk can only listen all the time", False),
 )
 
 
@@ -306,6 +311,46 @@ def _check_reader(r: Report, cfg: cfgmod.Config | None) -> None:
         )
 
 
+def _wake_ready(phrase: str) -> bool:
+    from jarvis.audio.wake import PHRASES, default_model_dir, missing
+
+    return (
+        phrase in PHRASES and _installed("onnxruntime") and not missing(phrase, default_model_dir())
+    )
+
+
+def _check_wake(r: Report, cfg: cfgmod.Config | None) -> None:
+    """Blocking only for the desk, and only when a wake word is configured."""
+    from jarvis.audio.wake import PHRASES, default_model_dir, missing
+
+    r.section("wake word")
+    if cfg is None:
+        return
+    if not cfg.voice.wake_word:
+        r.add(WARN, 'voice.wake_word = "": the desk listens all the time')
+        return
+    if cfg.voice.wake_word not in PHRASES:
+        r.add(BAD, f"no wake model called {cfg.voice.wake_word!r}; have {', '.join(PHRASES)}")
+        return
+    if not _installed("onnxruntime"):
+        r.add(BAD, "onnxruntime is not installed: pip install -e '.[wake]'")
+        return
+    where = default_model_dir()
+    gone = missing(cfg.voice.wake_word, where)
+    if gone:
+        r.add(BAD, f"wake model missing in {where}: python -m jarvis wake download")
+        return
+    phrase = PHRASES[cfg.voice.wake_word][1]
+    r.add(
+        OK,
+        f"'{phrase}' wakes the desk (threshold {cfg.voice.wake_threshold}, "
+        f"{cfg.voice.wake_window_s:.0f}s window); `python -m jarvis wake test` to measure",
+    )
+    from jarvis.audio.wake import LICENCE
+
+    r.add(WARN, LICENCE)
+
+
 def _check_hearing(r: Report, cfg: cfgmod.Config | None, db_path: str | None) -> None:
     """Never blocking: an empty lexicon still transcribes, it just mishears more."""
     from jarvis import hearing
@@ -430,6 +475,8 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
         desk_why = "no gemini_api_key"
     elif not audio_ok:
         desk_why = audio_why
+    elif cfg is not None and cfg.voice.wake_word and not _wake_ready(cfg.voice.wake_word):
+        desk_why = 'no wake model (python -m jarvis wake download), or set voice.wake_word = ""'
     verdict(not desk_why, "python -m jarvis desk", desk_why)
 
     cc_why = "" if claude_cli_path() else "no claude CLI (pip install -e '.[cc]')"
@@ -466,6 +513,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     _check_claude_cli(r)
     audio_ok, audio_why = _check_audio(r, cfg)
     _check_location(r, cfg)
+    _check_wake(r, cfg)
     _check_hearing(r, cfg, args.db)
     _check_reader(r, cfg)
     _check_tool_surface(r)
@@ -1164,6 +1212,77 @@ def cmd_weather(args: argparse.Namespace) -> int:
     return 0
 
 
+# ───────────────────────────── wake word ─────────────────────────────
+
+
+def cmd_wake(args: argparse.Namespace) -> int:
+    """`wake download` fetches the models; `wake test` says what score a phrase gets."""
+    from jarvis.audio import wake
+
+    cfg = cfgmod.load(args.config)
+    phrase = cfg.voice.wake_word or "hey_jarvis"
+    where = wake.default_model_dir()
+    if args.action == "download":
+        try:
+            got = wake.download(phrase, where)
+        except (wake.ModelsMissing, OSError) as exc:
+            print(f"couldn't download the wake model: {exc}", file=sys.stderr)
+            return 1
+        print(f"{OK}  {', '.join(got) if got else 'already present'} in {where}")
+        print(f"{WARN}  {wake.LICENCE}")
+        return 0
+
+    try:
+        model = wake.OnnxWakeWord(phrase, where)
+    except wake.ModelsMissing as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    if args.wav:
+        import wave
+
+        from jarvis.voice.engines import wav_to_pcm
+
+        try:
+            pcm, rate = wav_to_pcm(Path(args.wav).read_bytes())
+        except (OSError, ValueError, wave.Error) as exc:
+            print(f"couldn't read {args.wav}: {exc}", file=sys.stderr)
+            return 2
+        label = args.wav
+    else:
+        from jarvis.voice.engines import EngineFailed, EngineUnavailable, SystemEngine
+
+        text = " ".join(args.words) or wake.PHRASES[phrase][1]
+        try:
+            pcm, rate = SystemEngine().synth(text, "en"), 24_000
+        except (EngineUnavailable, EngineFailed) as exc:
+            print(f"no OS voice to say it with ({exc}); pass --wav", file=sys.stderr)
+            return 2
+        label = f"'{text}' (spoken by the OS voice)"
+    best = _wake_score(model, pcm, rate)
+    verdict = "WOULD wake" if best >= cfg.voice.wake_threshold else "would NOT wake"
+    print(f"{label}: best score {best:.3f} — {verdict} at threshold {cfg.voice.wake_threshold}")
+    return 0
+
+
+def _wake_score(model: Any, pcm: bytes, rate: int) -> float:
+    """The best score a recording gets, padded with a second of silence each side."""
+    import numpy as np
+
+    from jarvis.audio.wake import CHUNK
+
+    audio = np.frombuffer(pcm, dtype="<i2").astype(np.float32)
+    if rate != 16_000 and audio.size:
+        n = int(audio.size * 16_000 / rate)
+        audio = np.interp(np.linspace(0, audio.size - 1, n), np.arange(audio.size), audio)
+    pad = np.zeros(16_000, dtype=np.int16)
+    clip = np.concatenate((pad, audio.astype(np.int16), pad))
+    model.reset()
+    return max(
+        (model.score(clip[i : i + CHUNK]) for i in range(0, clip.size - CHUNK + 1, CHUNK)),
+        default=0.0,
+    )
+
+
 # ───────────────────────────── reminders ─────────────────────────────
 
 
@@ -1378,6 +1497,8 @@ class Desk:
     session: Any
     questions: Any
     reader: Any | None
+    #: The wake-word thread, or None when the desk listens all the time.
+    wake: Any | None = None
 
 
 def reader_engines(cfg: cfgmod.Config) -> list[Any]:
@@ -1488,7 +1609,12 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     except DeviceError as exc:
         raise StartupRefused(str(exc)) from exc
     print(f"{OK}  microphone and speaker: {selection.name}")
-    turn = TurnController(mixer=mixer, vad=EnergyVad(), uplink=uplink)
+    turn = TurnController(
+        mixer=mixer,
+        vad=EnergyVad(),
+        uplink=uplink,
+        wake_window_s=cfg.voice.wake_window_s if cfg.voice.wake_word else None,
+    )
     try:
         aec = leg.make_aec()
     except AecUnavailable as exc:
@@ -1516,6 +1642,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     # ── the voices ───────────────────────────────────────────────────────
     reader = _desk_reader(cfg, mixer)
     live_track = mixer.track("live", Prio.LIVE, content_rate=24_000)
+    wake = _desk_wake(cfg, graph, turn, mixer, args.db)
 
     # ── what a sentence is allowed to do ─────────────────────────────────
     transcript = Transcript()
@@ -1547,7 +1674,74 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         tools=tools,
         on_event=_desk_event_printer(transcript),
     )
-    return Desk(leg=leg, graph=graph, session=session, questions=questions, reader=reader)
+    return Desk(
+        leg=leg, graph=graph, session=session, questions=questions, reader=reader, wake=wake
+    )
+
+
+def _desk_wake(
+    cfg: cfgmod.Config, graph: Any, turn: Any, mixer: Any, db_path: str | None
+) -> Any | None:
+    """The wake-word thread for this desk, or None when it listens all the time.
+
+    A configured wake word whose model cannot load is a REFUSAL, not a quiet
+    fallback to always-listening: the user asked for a desk that sends nothing
+    until it hears its name, and silently sending everything instead is the one
+    failure here that is a privacy failure rather than an inconvenience.
+    """
+    if not cfg.voice.wake_word:
+        print(f'{WARN}  no wake word (voice.wake_word = ""): listening all the time')
+        return None
+    from jarvis.audio.mixer import Prio
+    from jarvis.audio.wake import (
+        PHRASES,
+        ModelsMissing,
+        OnnxWakeWord,
+        WakeDetector,
+        WakeWatch,
+        chime,
+    )
+
+    if cfg.voice.wake_word not in PHRASES:
+        raise StartupRefused(
+            f"no wake model called {cfg.voice.wake_word!r}; have {', '.join(sorted(PHRASES))}. "
+            'Set voice.wake_word to one of those, or "" to listen all the time.'
+        )
+    try:
+        model = OnnxWakeWord(cfg.voice.wake_word)
+    except ModelsMissing as exc:
+        raise StartupRefused(
+            f'{exc}\nOr set voice.wake_word = "" in config.toml to listen all the time.'
+        ) from exc
+    phrase = PHRASES[cfg.voice.wake_word][1]
+    blip = mixer.track("chime", Prio.MONITOR, content_rate=24_000) if cfg.voice.wake_chime else None
+
+    def on_wake(at: float, score: float) -> None:
+        if blip is not None:
+            blip.write(chime())
+        print(f"[awake] heard '{phrase}' ({score:.2f})")
+        try:
+            con = db.open_db(db_path)
+            try:
+                presence.note_heard(con, "wakeword", text=phrase, actor="desk")
+            finally:
+                con.close()
+        except Exception as exc:  # noqa: BLE001 - presence is a bonus; the wake already happened
+            print(f"[presence] {type(exc).__name__}: {exc}")
+
+    def on_sleep(at: float) -> None:
+        print(f"[asleep] say '{phrase}' to wake me")
+
+    print(f"{OK}  wake word: '{phrase}' (threshold {cfg.voice.wake_threshold})")
+    return WakeWatch(
+        reader=graph.reader("wake"),
+        model=model,
+        turn=turn,
+        phrase=phrase,
+        detector=WakeDetector(threshold=cfg.voice.wake_threshold),
+        on_wake=on_wake,
+        on_sleep=on_sleep,
+    )
 
 
 #: The session event kinds worth a line on the terminal. Taken from the
@@ -1632,12 +1826,18 @@ def cmd_desk(args: argparse.Namespace) -> int:
 
     async def run() -> None:
         leg.open(graph)
-        print("listening. ctrl-c to stop.")
+        if desk.wake is not None:
+            desk.wake.start()
+            print(f"asleep. say '{desk.wake.phrase}' to talk. ctrl-c to stop.")
+        else:
+            print("listening. ctrl-c to stop.")
         watcher = asyncio.create_task(watch_for_questions())
         try:
             await session.run()
         finally:
             watcher.cancel()
+            if desk.wake is not None:
+                desk.wake.stop()
             await session.close()
             leg.close()
 
@@ -1738,6 +1938,12 @@ def build_parser() -> argparse.ArgumentParser:
     rm.add_argument("action", choices=("list", "cancel"), nargs="?", default="list")
     rm.add_argument("words", nargs="*", help="cancel: which one")
     rm.set_defaults(fn=cmd_remind)
+
+    wk = sub.add_parser("wake", help="the wake word: download its model, or test a phrase")
+    wk.add_argument("action", choices=("download", "test"))
+    wk.add_argument("words", nargs="*", help="test: a phrase for the OS voice to say")
+    wk.add_argument("--wav", default=None, help="test: score a recording instead")
+    wk.set_defaults(fn=cmd_wake)
 
     h = sub.add_parser("hearing", help="the words Jarvis corrects when it mishears you")
     h.add_argument("action", choices=("list", "test", "teach", "forget"))

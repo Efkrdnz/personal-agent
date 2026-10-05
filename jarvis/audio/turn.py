@@ -177,6 +177,7 @@ class TurnController:
         self_speech_window_s: float = SELF_SPEECH_WINDOW_S,
         self_speech_tail_s: float = SELF_SPEECH_TAIL_S,
         clock: Callable[[], float] = time.monotonic,
+        wake_window_s: float | None = None,
     ) -> None:
         self._mixer = mixer
         self._vad = vad
@@ -205,6 +206,14 @@ class TurnController:
         self._utterance_started_at = 0.0
         self.barge_ins = 0
         self.echo_rejections = 0
+        # THE WAKE GATE. None is the old desk: always listening. A number means
+        # the desk starts ASLEEP and an idle onset opens no turn until wake()
+        # has been called within that many seconds of the last activity.
+        # Written by the wake thread, read here: one float, so no lock — a
+        # reader that sees the old value is one frame late, never wrong.
+        self.wake_window_s = wake_window_s
+        self._awake_until = float("-inf")
+        self._was_awake = False
 
     # -- introspection --------------------------------------------------------
 
@@ -224,6 +233,26 @@ class TurnController:
     def jarvis_speaking(self) -> bool:
         return self._mixer.is_playing
 
+    # -- the wake gate --------------------------------------------------------
+
+    def awake(self, at: float | None = None) -> bool:
+        """Would an onset at ``at`` open a turn? Always True with no wake word."""
+        if self.wake_window_s is None:
+            return True
+        now = self._clock() if at is None else at
+        return now < self._awake_until
+
+    def wake(self, at: float | None = None) -> None:
+        """The wake word was heard. Open the conversation window from now."""
+        if self.wake_window_s is None:
+            return
+        now = self._clock() if at is None else at
+        self._awake_until = max(self._awake_until, now + self.wake_window_s)
+
+    def sleep(self) -> None:
+        """Close the window now: "that's all", or a test."""
+        self._awake_until = float("-inf")
+
     # -- the chain ------------------------------------------------------------
 
     def feed(self, frame: np.ndarray, *, at: float | None = None) -> None:
@@ -240,6 +269,7 @@ class TurnController:
         # when it is needed.
         self._preroll.append(frame.copy())
         speech = self._vad.is_speech(frame)
+        self._track_wake(now)
 
         if self._state is TurnState.IDLE:
             self._feed_idle(speech, now)
@@ -248,9 +278,29 @@ class TurnController:
         else:
             self._feed_speaking(speech, now)
 
+    def _track_wake(self, now: float) -> None:
+        """Keep the window open while anyone is talking; notice when it closes."""
+        if self.wake_window_s is None:
+            return
+        # Any turn in progress, or Jarvis making a sound, is activity. That
+        # includes a question the desk reads aloud on its own: the user can
+        # answer it without saying the wake word first.
+        if self._state is not TurnState.IDLE or self.jarvis_speaking:
+            self._awake_until = max(self._awake_until, now + self.wake_window_s)
+        awake = now < self._awake_until
+        if awake != self._was_awake:
+            self._was_awake = awake
+            self._emit("wake.awake" if awake else "wake.asleep", now, {})
+
     def _feed_idle(self, speech: bool, now: float) -> None:
         self._onset_run = self._onset_run + 1 if speech else 0
         if self._onset_run < self.onset_frames:
+            return
+        if not self.jarvis_speaking and not self.awake(now):
+            # Asleep: the onset is counted, not acted on. Counting is what lets
+            # "hey Jarvis, what's the weather" open its turn on the very next
+            # frame after the wake word lands, with the pre-roll still holding
+            # the start of the request.
             return
         if not self.jarvis_speaking:
             self._commit(now, barge_in=False)
