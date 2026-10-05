@@ -68,6 +68,15 @@ def only(*paths: str):
     return lambda p: p in paths
 
 
+def _file_of(uri: str) -> Path:
+    # url2pathname, not the URL's path: on Windows that is "/C:/...", which
+    # names no file.
+    from urllib.parse import urlparse
+    from urllib.request import url2pathname
+
+    return Path(url2pathname(urlparse(uri).path))
+
+
 def _open(rec: Recorder, **kw: Any) -> str:
     kw.setdefault("which", nothing_on_path)
     kw.setdefault("exists", only())
@@ -242,7 +251,9 @@ def test_linux_finds_browsers_on_path_edge_first() -> None:
 
 def test_linux_chromium_alone_is_a_chrome_app() -> None:
     rec = Recorder()
-    how = _open(rec, which=lambda n: "/snap/bin/chromium" if n == "chromium" else None)
+    how = _open(
+        rec, which=lambda n: "/snap/bin/chromium" if n == "chromium" else None, platform="linux"
+    )
     assert how == "chrome-app"
     argv, kw = rec.runs[0]
     assert argv[0] == "/snap/bin/chromium"
@@ -343,14 +354,13 @@ def test_the_token_never_reaches_a_browser_argv() -> None:
 def test_the_redirect_file_is_private_and_carries_the_url(tmp_path, monkeypatch) -> None:
     import stat
     import tempfile
-    from urllib.parse import unquote, urlparse
 
     from jarvis.window.launch import redirect_file
 
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     url = f"http://127.0.0.1:5000/#t={TOKEN}"
     target = redirect_file(url, keep_s=60)
-    path = Path(unquote(urlparse(target).path))
+    path = _file_of(target)
     assert target.startswith("file://") and TOKEN not in target
     body = path.read_text(encoding="utf-8")
     assert f"url={url}" in body and 'http-equiv="refresh"' in body
@@ -377,11 +387,10 @@ def test_stale_redirect_files_are_swept(tmp_path, monkeypatch) -> None:
 
 def test_the_redirect_escapes_what_it_writes(tmp_path, monkeypatch) -> None:
     import tempfile
-    from urllib.parse import unquote, urlparse
 
     from jarvis.window.launch import redirect_file
 
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     target = redirect_file('http://127.0.0.1:1/#t="><script>x</script>', keep_s=60)
-    body = Path(unquote(urlparse(target).path)).read_text(encoding="utf-8")
+    body = _file_of(target).read_text(encoding="utf-8")
     assert "<script>" not in body
