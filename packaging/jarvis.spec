@@ -29,6 +29,14 @@ WHAT MUST NEVER BE INSIDE: openWakeWord's pretrained models. They are
 CC BY-NC-SA and are downloaded on the user's machine at run time (ADR 0012).
 The build refuses to finish if one turns up among the collected files.
 
+WHAT MUST BE INSIDE, AND IS NOT IN GIT: Silero VAD's model, the thing that
+tells a breath from a word. It is MIT, so it ships, with its notice; it is a
+2 MB binary, so it is never committed. The workflow fetches it into
+``packaging/models/`` with ``python -m jarvis.audio.vadmodel download``,
+verified against the same pin the app uses, and on Windows this spec refuses
+to build without it: an exe that quietly fell back to the basic detector
+would let every headset breath through as a turn.
+
 Windows is the target; the same spec runs on Linux as a check that it
 evaluates and that analysis succeeds, with the Windows-only pieces (PortAudio
 ships inside sounddevice's Windows wheel; tzdata is a Windows-only dependency)
@@ -115,6 +123,11 @@ EXCLUDES = (
 #: The openWakeWord model files (jarvis/audio/wake.py MODELS). ADR 0012.
 NEVER_BUNDLE = ("melspectrogram.onnx", "embedding_model.onnx", "hey_jarvis")
 
+#: Where the workflow puts the Silero model before this runs (gitignored), and
+#: the MIT notice that travels with it. Both land in vadmodel.BUNDLE_DIR.
+VAD_MODEL_DIR = "packaging/models"
+VAD_NOTICE = "packaging/licenses/silero-vad.txt"
+
 _NATIVE = ("**/*.dll", "**/*.dylib", "**/*.so", "**/*.so.*", "**/*.pyd")
 
 
@@ -183,6 +196,27 @@ def _hiddenimports():
     return sorted(set(names))
 
 
+def _vad_model():
+    """The Silero model and its notice as data entries, checked against the app's own pin.
+
+    Imported from jarvis rather than repeated here, so the build cannot carry a
+    file the app would refuse when it looks for it at BUNDLE_DIR.
+    """
+    from jarvis.audio import vadmodel
+
+    src = ROOT / VAD_MODEL_DIR / vadmodel.MODEL
+    if not vadmodel.verified(src):
+        why = "is not there" if not src.exists() else "does not match its pinned SHA-256"
+        if WINDOWS:
+            raise SystemExit(
+                f"jarvis.spec: {src} {why}. Fetch it first:\n"
+                f"  python -m jarvis.audio.vadmodel download {VAD_MODEL_DIR}"
+            )
+        _note(f"{src} {why}; this build will not carry the voice activity model")
+        return []
+    return [(str(src), vadmodel.BUNDLE_DIR), (str(ROOT / VAD_NOTICE), vadmodel.BUNDLE_DIR)]
+
+
 def _refuse_wake_models(entries):
     bad = sorted(
         dest
@@ -242,7 +276,7 @@ a = Analysis(  # noqa: F821 - PyInstaller defines the build classes in the spec'
     [str(ROOT / "packaging" / "jarvis_app.py")],
     pathex=[str(ROOT)],
     binaries=_binaries,
-    datas=_jarvis_datas() + _datas,
+    datas=_jarvis_datas() + _datas + _vad_model(),
     hiddenimports=_hiddenimports(),
     hookspath=[],
     hooksconfig={},
