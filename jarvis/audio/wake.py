@@ -186,7 +186,7 @@ class OnnxWakeWord:
         try:
             import onnxruntime as ort
         except ImportError as exc:
-            raise ModelsMissing("onnxruntime is not installed: pip install -e '.[wake]'") from exc
+            raise ModelsMissing('onnxruntime is not installed: pip install -e ".[wake]"') from exc
         opts = ort.SessionOptions()
         # One thread each: this runs beside a real-time audio callback, and a
         # wake model that grabs every core is a dropout in the speaker.

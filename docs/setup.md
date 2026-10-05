@@ -15,11 +15,35 @@ safe to paste anywhere.
 
 ## 1. The machine
 
+Linux or macOS:
+
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install -e '.[cc,voice,live,tts,geo,wake,secrets,dev]'
-sudo apt install espeak-ng      # the built-in reader voice (macOS `say` / Windows SAPI need nothing)
+uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,dev]"
+sudo apt install espeak-ng      # Linux only: the built-in reader voice (macOS has `say`)
 ```
+
+Windows (Command Prompt or PowerShell, from the repository folder):
+
+```bat
+uv venv
+.venv\Scripts\activate
+uv pip install -e ".[cc,voice,live,tts,geo,wake,secrets,dev]"
+```
+
+In PowerShell the activate line is `.venv\Scripts\Activate.ps1`. Windows reads aloud with its own SAPI
+voice, so there is nothing else to install.
+
+Two things that cost an afternoon if you do not know them:
+
+- **Use double quotes around `".[...]"`.** Command Prompt does not treat single quotes as quotes, so
+  `'.[cc,voice]'` reaches pip with the quotes still on and pip answers *"'.[cc,voice]' is not a valid
+  editable requirement"*. Curly quotes (`‘ ’`, from copying rendered text) do the same in every shell.
+  Double quotes work in Command Prompt, PowerShell, bash and zsh alike.
+- **A venv made by `uv venv` has no pip in it.** Install with `uv pip install`, as above. If you would
+  rather use pip, make the venv with `python -m venv .venv` and install with
+  `python -m pip install -e ".[...]"`. A bare `pip` inside a uv venv silently falls through to some
+  other Python's pip and installs Jarvis there instead.
 
 | extra | what stops working without it |
 |---|---|
@@ -140,7 +164,7 @@ anyone said, including a question it reads aloud on its own, so you can answer t
 "Hey Jarvis, what's the weather" works as one sentence.
 
 ```bash
-uv pip install -e '.[wake]'                 # onnxruntime
+uv pip install -e ".[wake]"                 # onnxruntime
 python -m jarvis wake download              # three small ONNX files, SHA-256 pinned
 python -m jarvis wake test                  # the score your OS voice gets saying "hey jarvis"
 python -m jarvis wake test --wav me.wav     # or a recording of you

@@ -9,7 +9,7 @@ requirement 3's core flow needs a different design. It passed, so the design sta
 Reproduce with:
 
 ```bash
-uv venv .venv && . .venv/bin/activate && uv pip install -e '.[cc,dev]'
+uv venv .venv && . .venv/bin/activate && uv pip install -e ".[cc,dev]"
 python spikes/s0_crossproc/run_spike.py --gap 180
 ```
 

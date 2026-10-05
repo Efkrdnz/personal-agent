@@ -266,6 +266,6 @@ def keyring_available() -> tuple[bool, str]:
             )
         return True, f"keyring backend: {type(backend).__name__}"
     except ImportError:
-        return False, "the keyring package is not installed (pip install -e '.[secrets]')"
+        return False, 'the keyring package is not installed (pip install -e ".[secrets]")'
     except Exception as e:  # noqa: BLE001
         return False, f"keyring is present but unusable: {type(e).__name__}"

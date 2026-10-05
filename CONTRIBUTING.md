@@ -53,7 +53,7 @@ does not have to.
 
 ```bash
 uv venv && . .venv/bin/activate
-uv pip install -e '.[cc,dev]'
+uv pip install -e ".[cc,dev]"
 
 pytest -q
 ruff check . && ruff format --check .

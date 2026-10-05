@@ -132,7 +132,7 @@ def _validate(path: Path) -> str:
     try:
         import maxminddb  # noqa: PLC0415 - optional extra
     except ImportError as exc:
-        raise UpdateFailed("the GeoLite2 reader isn't installed: pip install -e '.[geo]'") from exc
+        raise UpdateFailed('the GeoLite2 reader isn\'t installed: pip install -e ".[geo]"') from exc
     try:
         with maxminddb.open_database(str(path)) as reader:
             kind = str(reader.metadata().database_type)

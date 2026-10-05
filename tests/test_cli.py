@@ -467,7 +467,7 @@ def test_doctor_checks_the_cli_the_driver_would_actually_run() -> None:
     """The SDK bundles its own CLI and prefers it; PATH is only its fallback.
 
     Checking PATH alone is wrong in both directions — "missing" where
-    `pip install -e '.[cc]'` is sufficient, and the version of a binary the
+    `pip install -e ".[cc]"` is sufficient, and the version of a binary the
     driver will never execute, on a repo whose measured facts are pinned to one
     CLI build.
     """

@@ -204,7 +204,7 @@ def _check_packages(r: Report) -> None:
         else:
             r.add(
                 BAD if required else WARN,
-                f"{module} — without it, {breaks}  (pip install -e '.[{extra}]')",
+                f'{module} — without it, {breaks}  (pip install -e ".[{extra}]")',
             )
 
 
@@ -213,7 +213,7 @@ def claude_cli_path() -> str | None:
 
     ``claude-agent-sdk`` ships its own pinned CLI and prefers it; ``shutil.which``
     is only its fallback. Checking PATH alone gets this wrong in BOTH directions:
-    it reports "missing" on a machine where ``pip install -e '.[cc]'`` is all that
+    it reports "missing" on a machine where ``pip install -e ".[cc]"`` is all that
     is needed, and it reports the version of a binary the driver will never
     execute. CLAUDE.md pins the measured facts to one CLI build, so which build
     runs is not a detail.
@@ -235,7 +235,7 @@ def _check_claude_cli(r: Report) -> None:
     r.section("claude code")
     exe = claude_cli_path()
     if exe is None:
-        r.add(BAD, "no `claude` CLI — the SDK bundles one; pip install -e '.[cc]'")
+        r.add(BAD, 'no `claude` CLI — the SDK bundles one; pip install -e ".[cc]"')
         return
     bundled = "bundled with the SDK" if "claude_agent_sdk" in exe else "from PATH"
     try:
@@ -266,7 +266,7 @@ def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
     """
     r.section("audio")
     if not _installed("sounddevice"):
-        why = "sounddevice is not installed (pip install -e '.[voice]')"
+        why = 'sounddevice is not installed (pip install -e ".[voice]")'
         r.add(BAD, why)
         return False, why
     from jarvis.audio import DEV_RATE
@@ -333,7 +333,7 @@ def _check_wake(r: Report, cfg: cfgmod.Config | None) -> None:
         r.add(BAD, f"no wake model called {cfg.voice.wake_word!r}; have {', '.join(PHRASES)}")
         return
     if not _installed("onnxruntime"):
-        r.add(BAD, "onnxruntime is not installed: pip install -e '.[wake]'")
+        r.add(BAD, 'onnxruntime is not installed: pip install -e ".[wake]"')
         return
     where = default_model_dir()
     gone = missing(cfg.voice.wake_word, where)
@@ -404,7 +404,7 @@ def _check_location(r: Report, cfg: cfgmod.Config | None) -> None:
     path = locator_for(cfg).db_path
     if not _installed("maxminddb"):
         r.add(
-            WARN, "no city or coordinates set, and maxminddb is missing (pip install -e '.[geo]')"
+            WARN, 'no city or coordinates set, and maxminddb is missing (pip install -e ".[geo]")'
         )
         return
     if not path.exists():
@@ -479,12 +479,12 @@ def _readiness(r: Report, cfg: cfgmod.Config | None, audio_ok: bool, audio_why: 
         desk_why = 'no wake model (python -m jarvis wake download), or set voice.wake_word = ""'
     verdict(not desk_why, "python -m jarvis desk", desk_why)
 
-    cc_why = "" if claude_cli_path() else "no claude CLI (pip install -e '.[cc]')"
+    cc_why = "" if claude_cli_path() else 'no claude CLI (pip install -e ".[cc]")'
     verdict(not cc_why, "python -m jarvis.cc", cc_why)
     verdict(not cc_why, "python -m jarvis run", cc_why)
     chat_why = "" if have.get("gemini_api_key") else "no gemini_api_key"
     if not chat_why and not _installed("google.genai"):
-        chat_why = "google-genai is not installed (pip install -e '.[live]')"
+        chat_why = 'google-genai is not installed (pip install -e ".[live]")'
     verdict(not chat_why, "python -m jarvis chat", chat_why)
     build_why = "" if have.get("gemini_api_key") else "no gemini_api_key (it tidies your words)"
     r.add(
@@ -559,7 +559,7 @@ def cmd_secrets(args: argparse.Namespace) -> int:
         secrets.store(args.name, value)
     except ImportError:
         print(
-            "the keyring package is not installed (pip install -e '.[secrets]').\n"
+            'the keyring package is not installed (pip install -e ".[secrets]").\n'
             f"Until then, export {secrets.SECRETS[0].env}=... in the shell that runs Jarvis.",
             file=sys.stderr,
         )
@@ -791,7 +791,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     """
     if not _installed("claude_agent_sdk") or claude_cli_path() is None:
         print(
-            "Claude Code is not installed here: pip install -e '.[cc]'\n"
+            'Claude Code is not installed here: pip install -e ".[cc]"\n'
             "Run `python -m jarvis doctor` for the whole picture.",
             file=sys.stderr,
         )
@@ -1088,7 +1088,7 @@ def cmd_chat(args: argparse.Namespace) -> int:
         print(str(exc), file=sys.stderr)
         return 2
     if not _installed("google.genai"):
-        print("google-genai is not installed: pip install -e '.[live]'", file=sys.stderr)
+        print('google-genai is not installed: pip install -e ".[live]"', file=sys.stderr)
         return 2
 
     con = db.open_db(args.db)
@@ -1551,7 +1551,7 @@ def _desk_reader(cfg: cfgmod.Config, mixer: Any) -> Any:
         raise StartupRefused(
             "no reader voice that can read a question word for word. The simplest is your "
             "system's own: `sudo apt install espeak-ng` on Linux (macOS and Windows have one "
-            "built in). Or `pip install -e '.[tts]'` for Microsoft's voices."
+            'built in). Or `pip install -e ".[tts]"` for Microsoft\'s voices.'
         )
     print(f"{OK}  reader voice: {' -> '.join(e.name for e in ladder)}")
     track = mixer.track("verbatim", Prio.VERBATIM, content_rate=24_000)
@@ -1568,7 +1568,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
     if missing:
         raise StartupRefused(
             f"missing packages: {', '.join(missing)}. Run `python -m jarvis doctor` for the "
-            "install commands, or `pip install -e '.[cc,voice,live,tts]'`."
+            'install commands, or `pip install -e ".[cc,voice,live,tts]"`.'
         )
 
     from jarvis.audio import BLOCK, DEV_RATE, MIC_RATE
@@ -1624,7 +1624,7 @@ def _build_desk(args: argparse.Namespace) -> Desk:
         # here would have caught it.
         raise StartupRefused(
             f"{exc}\nYou have voice.assume_headset = false, which means open speakers and "
-            "therefore a real echo canceller. Either `pip install -e '.[aec]'`, or set "
+            'therefore a real echo canceller. Either `pip install -e ".[aec]"`, or set '
             "assume_headset = true and use a headset."
         ) from exc
     graph = AudioGraph(

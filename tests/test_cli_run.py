@@ -119,7 +119,7 @@ def test_run_refuses_without_the_sdk_and_creates_nothing(
 ) -> None:
     monkeypatch.setattr(cli, "_installed", lambda m: m != "claude_agent_sdk")
     assert run_cli(["run", "build a thing", "--into", str(tmp_path)], dbpath) == 2
-    assert "pip install -e '.[cc]'" in capsys.readouterr().err
+    assert 'pip install -e ".[cc]"' in capsys.readouterr().err
     con = connect(dbpath)
     try:
         assert con.execute("SELECT COUNT(*) c FROM jobs").fetchone()["c"] == 0

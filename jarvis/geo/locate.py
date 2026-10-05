@@ -113,7 +113,7 @@ def lookup(db_path: Path, ip: str, *, language: str = "en") -> Place:
         import maxminddb  # noqa: PLC0415 - optional extra, see the module docstring
     except ImportError as exc:
         raise GeoUnavailable(
-            "the GeoLite2 reader isn't installed: pip install -e '.[geo]'"
+            'the GeoLite2 reader isn\'t installed: pip install -e ".[geo]"'
         ) from exc
 
     try:

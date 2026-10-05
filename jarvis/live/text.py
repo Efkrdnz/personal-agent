@@ -82,7 +82,7 @@ class GeminiText:
                 from google import genai
             except ImportError as exc:  # pragma: no cover - the extra is installed in CI
                 raise TextCallFailed(
-                    "google-genai is not installed: pip install '.[live]'"
+                    'google-genai is not installed: pip install -e ".[live]"'
                 ) from exc
             client = genai.Client(api_key=self.api_key)
 

@@ -497,7 +497,7 @@ class GenaiConnector:
                 from google import genai
             except ImportError as exc:  # pragma: no cover - the extra is installed in CI
                 raise LiveUnavailable(
-                    "google-genai is not installed: pip install '.[live]'"
+                    'google-genai is not installed: pip install -e ".[live]"'
                 ) from exc
             client = genai.Client(api_key=self.api_key)
         config = live_connect_config(profile, handle=handle, declarations=declarations)
