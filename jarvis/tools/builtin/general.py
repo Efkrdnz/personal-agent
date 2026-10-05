@@ -18,7 +18,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from jarvis import memory
-from jarvis.clock import local_tz, spoken_date
+from jarvis.clock import day_month, local_tz, spoken_date
 from jarvis.ids import parse_ts
 from jarvis.tools.ctx import ToolCtx
 from jarvis.tools.registry import Tool, ToolError
@@ -60,7 +60,7 @@ def _when(ts: str, zone: ZoneInfo, today: datetime) -> str:
         return f"{clock} today"
     if days == 1:
         return f"{clock} tomorrow"
-    return f"{clock} on {local.strftime('%A %-d %B')}"
+    return f"{clock} on {day_month(local)}"
 
 
 # ───────────────────────────── memory ─────────────────────────────

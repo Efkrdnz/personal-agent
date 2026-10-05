@@ -680,6 +680,25 @@ _SUN_PATH_MAX = 100
 _POKE_BYTE = b"\x01"
 
 
+def _user_tag() -> str:
+    """Who owns these sockets, in a form that exists on every OS.
+
+    ``os.getuid`` does not exist on Windows, where newer Pythons DO have
+    ``AF_UNIX`` — so the guard on the socket family let the call through and
+    the bind path raised AttributeError instead of failing soft.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    import getpass
+
+    try:
+        name = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no user name is a reason for a generic tag, not a crash
+        name = "user"
+    return hashlib.sha256(name.encode("utf-8")).hexdigest()[:8]
+
+
 def poke_dir() -> Path:
     """Where poke sockets live. ``XDG_RUNTIME_DIR`` is wiped at logout, which is
     how stale sockets clean themselves up without a reaper."""
@@ -687,7 +706,7 @@ def poke_dir() -> Path:
         return Path(d)
     if r := os.environ.get("XDG_RUNTIME_DIR"):
         return Path(r) / "jarvis" / "poke"
-    return Path(tempfile.gettempdir()) / f"jarvis-{os.getuid()}" / "poke"
+    return Path(tempfile.gettempdir()) / f"jarvis-{_user_tag()}" / "poke"
 
 
 def poke_path(peer_id: str) -> Path:
@@ -695,7 +714,7 @@ def poke_path(peer_id: str) -> Path:
     if len(str(p)) <= _SUN_PATH_MAX:
         return p
     short = hashlib.sha256(peer_id.encode("utf-8")).hexdigest()[:12]
-    return Path(tempfile.gettempdir()) / f"jarvis-{os.getuid()}-{short}.sock"
+    return Path(tempfile.gettempdir()) / f"jarvis-{_user_tag()}-{short}.sock"
 
 
 def poke(addr: str | Path) -> bool:

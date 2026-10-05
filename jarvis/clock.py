@@ -18,7 +18,7 @@ from zoneinfo import ZoneInfo
 
 from jarvis.ids import parse_ts
 
-__all__ = ["local_tz", "to_local", "spoken_time", "spoken_date"]
+__all__ = ["day_month", "local_tz", "to_local", "spoken_time", "spoken_date"]
 
 DEFAULT_TZ = "Europe/Istanbul"
 
@@ -41,4 +41,14 @@ def spoken_time(ts: str | datetime) -> str:
 
 def spoken_date(ts: str | datetime) -> str:
     """'Tuesday 16 September' — no year; if it needs a year, say so explicitly."""
-    return to_local(ts).strftime("%A %-d %B")
+    return day_month(to_local(ts))
+
+
+def day_month(dt: datetime) -> str:
+    """'Tuesday 16 September', built by hand.
+
+    Not ``strftime("%A %-d %B")``: the ``-`` flag is a glibc extension, and
+    Windows' C runtime raises ValueError on it, so every spoken date crashed
+    there.
+    """
+    return f"{dt.strftime('%A')} {dt.day} {dt.strftime('%B')}"

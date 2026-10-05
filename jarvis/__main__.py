@@ -270,14 +270,20 @@ def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
         r.add(BAD, why)
         return False, why
     from jarvis.audio import DEV_RATE
-    from jarvis.audio.devices import DeviceError, PortAudioProbe, select_duplex_device
+    from jarvis.audio.devices import (
+        DeviceError,
+        PortAudioProbe,
+        select_duplex_device,
+        usable_devices,
+    )
 
     probe = PortAudioProbe()
     try:
         found = list(probe.devices())
-        r.add(OK, f"{len(found)} device(s), {sum(1 for d in found if d.duplex)} full-duplex")
-        for d in [x for x in found if x.duplex][:6]:
-            r.add(OK, f"  [{d.index}] {d.name}  ({d.hostapi}, {d.default_samplerate:.0f} Hz)")
+        usable = usable_devices(found)
+        r.add(OK, f"{len(found)} endpoint(s); {len(usable)} device(s) can both listen and speak")
+        for label in usable[:6]:
+            r.add(OK, f"  {label}")
     except DeviceError as exc:
         r.add(BAD, str(exc))
         return False, str(exc)
@@ -288,7 +294,7 @@ def _check_audio(r: Report, cfg: cfgmod.Config | None) -> tuple[bool, str]:
     except DeviceError as exc:
         r.add(BAD, f"{type(exc).__name__}: {exc}")
         return False, str(exc)
-    r.add(OK, f"desk would use: {selection.name}")
+    r.add(OK, f"desk would use: {selection.describe()}")
     return True, ""
 
 
