@@ -23,8 +23,16 @@ jobs:
       # message dataclasses, which is the only way the recorded payload shapes
       # can be checked on every commit without a credential. The spine still
       # imports on a bare interpreter; the step at the bottom proves it.
+      # Every extra the TESTS exercise, not just cc. With only cc+dev, numpy was
+      # missing and pytest stopped at collection (exit 2) on the audio, voice and
+      # wake tests — CI was red from 2026-09-17 for that reason alone. PortAudio
+      # stays uninstalled on purpose: a test asserts the graph imports and runs
+      # without a sound card. espeak-ng lets the real OS-voice tests run instead
+      # of skipping.
       - name: Install
-        run: uv venv && uv pip install -e ".[cc,dev]"
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq espeak-ng
+          uv venv && uv pip install -e ".[cc,voice,live,geo,wake,dev]"
 
       # Runs first and on its own: if a secret pattern has gone inert, that is
       # the most urgent thing in the log, not something to find under a lint dump.
@@ -52,4 +60,6 @@ jobs:
       # The spine must import on a bare interpreter. Every process opens the
       # database, including ones that will never install the voice or CC deps.
       - name: Spine imports with no third-party packages
-        run: uv run python -S -c "import jarvis.answers, jarvis.db, jarvis.ids, jarvis.clock; print('ok')"
+        run: >-
+          uv run python -S -c "import jarvis.answers, jarvis.db, jarvis.ids, jarvis.clock,
+          jarvis.hearing, jarvis.memory, jarvis.liveness; print('ok')"
