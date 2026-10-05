@@ -78,12 +78,27 @@ jobs:
           if ($LASTEXITCODE) { "exit code $LASTEXITCODE" | Add-Content $log; exit $LASTEXITCODE }
           python -m pip list 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log -Append
 
+      # Silero VAD (MIT) is what tells a breath from a word, and it ships inside
+      # the exe. Fetched with the app's own download and SHA-256 pin, then
+      # self-checked (a model that cannot hear a vowel fails here), into
+      # packaging/models/: gitignored, and where jarvis.spec refuses to build
+      # without it. Before the tests, so the real-model tests run on Windows.
+      - name: Fetch the voice activity model
+        id: vadmodel
+        run: |
+          [Console]::OutputEncoding = [Text.Encoding]::UTF8
+          $log = 'ci-logs/01-vad-model.log'
+          python -m jarvis.audio.vadmodel download packaging/models 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          if ($LASTEXITCODE) { "exit code $LASTEXITCODE" | Add-Content $log; exit $LASTEXITCODE }
+
       # The whole suite, on Windows, reported rather than masked. Not -x: one
       # run should name every Windows failure, not the first, because each run
       # costs a quarter of an hour. faulthandler_timeout prints the stack of a
-      # test that hangs, which is otherwise a silent job timeout.
+      # test that hangs, which is otherwise a silent job timeout. Run even when
+      # the model fetch failed, which the model's own tests then report.
       - name: Tests
         id: tests
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
         timeout-minutes: 30
         run: |
           [Console]::OutputEncoding = [Text.Encoding]::UTF8

@@ -116,6 +116,9 @@ def checks(platform: str) -> tuple[Check, ...]:
         Check("portaudio", _portaudio, critical=bundled_portaudio),
         Check("soxr", _soxr),
         Check("onnxruntime", _onnxruntime),
+        # Critical where the model ships inside the app: without it every
+        # breath on a headset is a turn again, and nothing else would say so.
+        Check("voice activity", _voice_activity, critical=windows),
         Check("google.genai", _genai),
         Check("keyring", lambda: _keyring(windows)),
         Check("claude code", _claude),
@@ -148,6 +151,8 @@ _MODULES = (
     "jarvis.voice.desk",
     "jarvis.audio.devices",
     "jarvis.audio.wake",
+    "jarvis.audio.vadmodel",
+    "jarvis.audio.fillers",
     "jarvis.app.supervisor",
     "jarvis.app.setup",
     "jarvis.app.adapters",
@@ -196,6 +201,33 @@ def _onnxruntime() -> str:
     import onnxruntime as ort
 
     return f"{ort.__version__} ({', '.join(ort.get_available_providers())})"
+
+
+def _voice_activity(meipass: str | None = None) -> str:
+    """The Silero model is where the build put it, and it can HEAR.
+
+    Loading is not enough: a model fed its frames without the 64-sample context
+    loads, runs and is deaf. So this scores a synthetic vowel and a breath with
+    the same wrapper the desk uses. A frozen app must find its OWN copy, not
+    one some earlier pip install left in the user's folder.
+    """
+    from jarvis.audio import vadmodel
+    from jarvis.audio.dsp import SileroVad
+
+    base = getattr(sys, "_MEIPASS", None) if meipass is None else meipass
+    dirs = (Path(base) / vadmodel.BUNDLE_DIR,) if base else vadmodel.search_dirs()
+    path = vadmodel.find(dirs)
+    if path is None:
+        if base:
+            raise RuntimeError(
+                f"{vadmodel.MODEL} is not inside the bundle ({', '.join(map(str, dirs))}); "
+                "the build skipped packaging/models"
+            )
+        raise Skipped(f"no {vadmodel.MODEL} here yet; the desk downloads it on first use")
+    heard = SileroVad(path, check=False).self_check()
+    if not heard.ok:
+        raise RuntimeError(f"{path} {heard.describe()}: the voice detector cannot tell them apart")
+    return f"{heard.describe()}{_frozen_note(path)}"
 
 
 def _genai() -> str:

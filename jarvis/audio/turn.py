@@ -21,6 +21,16 @@ The cost of a false positive is a barely audible dip, NOT a lost turn. That
 asymmetry is why the duck is on suspicion and the commit is on confirmation, and
 never the other way round.
 
+THE IDLE TURN HAS NO CONFIRM WINDOW, so its onset is where noise must be
+dropped. With nothing playing, the first onset opens a turn and sends
+``activity_start`` at once, and Gemini has no way to take a turn back: a breath
+that got that far is answered, transcribed as "huh". So ``idle_onset=(K, W)``
+asks for K speech frames in any W before committing, and a candidate that never
+gets there is logged as ``onset.rejected`` and costs nothing, because nothing
+has left the machine. It never leaves IDLE either, so it does not hold the wake
+window open the way a false turn did. The longer wait is paid for by a longer
+idle pre-roll, which is why the two are separate from the barge-in's.
+
 CLIENT-DRIVEN TURNS, RULE 4. ``automatic_activity_detection.disabled=True`` on
 both profiles and we send ``activity_start``/``activity_end`` ourselves. This is
 the one decision that unifies desk and telephone: the telephony path already
@@ -40,6 +50,7 @@ about the kill switch.
 
 from __future__ import annotations
 
+import math
 import re
 import time
 import unicodedata
@@ -63,7 +74,7 @@ from jarvis.audio import (
     SELF_SPEECH_TAIL_S,
     SELF_SPEECH_WINDOW_S,
 )
-from jarvis.audio.dsp import Vad
+from jarvis.audio.dsp import Vad, dbfs
 from jarvis.audio.mixer import PlaybackMixer
 
 __all__ = [
@@ -178,6 +189,9 @@ class TurnController:
         self_speech_tail_s: float = SELF_SPEECH_TAIL_S,
         clock: Callable[[], float] = time.monotonic,
         wake_window_s: float | None = None,
+        idle_onset: tuple[int, int] | None = None,
+        idle_preroll_ms: int | None = None,
+        max_turn_s: float | None = None,
     ) -> None:
         self._mixer = mixer
         self._vad = vad
@@ -191,7 +205,30 @@ class TurnController:
         self._clock = clock
         self._frame_ms = 1000 * vad.frame_samples / rate
         self._hangover_frames = max(1, round(hangover_ms / self._frame_ms))
-        self._preroll: deque[np.ndarray] = deque(maxlen=max(1, round(preroll_ms / self._frame_ms)))
+        # ``preroll_ms`` is what a barge-in sends; an idle commit sends
+        # ``idle_preroll_ms``. Unset, both are ``preroll_ms``, as they always were.
+        self._barge_frames = max(1, round(preroll_ms / self._frame_ms))
+        self._idle_frames = (
+            self._barge_frames
+            if idle_preroll_ms is None
+            else max(1, round(idle_preroll_ms / self._frame_ms))
+        )
+        self._preroll: deque[np.ndarray] = deque(maxlen=max(self._barge_frames, self._idle_frames))
+        # None keeps the old idle rule: ``onset_frames`` in a row commit.
+        if idle_onset is not None and not 0 < idle_onset[0] <= idle_onset[1]:
+            raise ValueError(f"idle_onset must be (K, W) with 0 < K <= W, got {idle_onset}")
+        self.idle_onset = idle_onset
+        self._idle_k = idle_onset[0] if idle_onset else onset_frames
+        self._idle_window: deque[bool] = deque(maxlen=idle_onset[1] if idle_onset else 1)
+        self._candidate_frames = 0
+        self._candidate_score = 0.0
+        self._candidate_dbfs = -math.inf
+        self.onsets_rejected = 0
+        self.max_turn_s = max_turn_s
+        self._turn_started_at = 0.0
+        # Set when a turn was cut off by max_turn_s: whatever kept the VAD on
+        # must stop before another turn may start, or the cut-off is a loop.
+        self._quiet_needed = False
         self._state = TurnState.IDLE
         self._onset_run = 0
         self._silence_run = 0
@@ -307,6 +344,14 @@ class TurnController:
 
     def _feed_idle(self, speech: bool, now: float) -> None:
         self._onset_run = self._onset_run + 1 if speech else 0
+        if self._quiet_needed:
+            if speech:
+                self._onset_run = 0
+                return
+            self._quiet_needed = False
+        if self.idle_onset is not None:
+            self._feed_idle_windowed(speech, now)
+            return
         if self._onset_run < self.onset_frames:
             return
         if not self.jarvis_speaking and not self.awake(now):
@@ -318,6 +363,65 @@ class TurnController:
         if not self.jarvis_speaking:
             self._commit(now, barge_in=False)
             return
+        self._suspect(now)
+
+    def _feed_idle_windowed(self, speech: bool, now: float) -> None:
+        """K speech frames in any W open a turn; fewer are dropped before anything is sent."""
+        if self.jarvis_speaking:
+            # The barge-in keeps its own rule, three in a row then the confirm
+            # window. Frames heard over playback may be our own echo, so none
+            # of them may count towards an idle turn once playback stops.
+            self._forget_candidate()
+            if self._onset_run >= self.onset_frames:
+                self._suspect(now)
+            return
+        # Appended BEFORE the wake check, for the reason the asleep branch
+        # above gives: the window must already be full when the wake lands.
+        self._idle_window.append(speech)
+        if speech:
+            self._note_candidate()
+        if sum(self._idle_window) >= self._idle_k:
+            if self.awake(now):
+                self._commit(now, barge_in=False)
+            return
+        if self._candidate_frames and not any(self._idle_window):
+            self._reject_candidate(now)
+
+    def _note_candidate(self) -> None:
+        self._candidate_frames += 1
+        self._candidate_score = max(
+            self._candidate_score, float(getattr(self._vad, "last_score", 0.0))
+        )
+        level = getattr(self._vad, "last_dbfs", None)
+        if level is None:
+            level = dbfs(self._preroll[-1])
+        self._candidate_dbfs = max(self._candidate_dbfs, float(level))
+
+    def _reject_candidate(self, now: float) -> None:
+        # Reported only while awake, where the old rule would have opened a
+        # turn: asleep, every breath would be a row in a log kept forever.
+        if self.awake(now):
+            self.onsets_rejected += 1
+            peak = self._candidate_dbfs
+            self._emit(
+                "onset.rejected",
+                now,
+                {
+                    "speech_frames": self._candidate_frames,
+                    "needed": list(self.idle_onset or ()),
+                    "max_score": round(self._candidate_score, 3),
+                    "peak_dbfs": round(peak, 1) if math.isfinite(peak) else None,
+                },
+            )
+        self._forget_candidate()
+
+    def _forget_candidate(self) -> None:
+        self._idle_window.clear()
+        self._candidate_frames = 0
+        self._candidate_score = 0.0
+        self._candidate_dbfs = -math.inf
+
+    def _suspect(self, now: float) -> None:
         # Suspicion, not commitment: Gemini keeps generating and nothing is sent.
         self._mixer.duck(self.duck_db, ramp_ms=DUCK_RAMP_MS)
         self._state = TurnState.SUSPECT
@@ -348,6 +452,7 @@ class TurnController:
             self._mixer.ramp_to(1.0, ramp_ms=RESTORE_RAMP_MS)
             self._state = TurnState.IDLE
             self._onset_run = 0
+            self._forget_candidate()
             self.echo_rejections += 1
             self._emit(
                 "barge_in.echo",
@@ -360,18 +465,30 @@ class TurnController:
             )
 
     def _feed_speaking(self, speech: bool, now: float) -> None:
-        if speech:
-            self._silence_run = 0
-            self._uplink.send(self._preroll[-1])
-            return
-        self._silence_run += 1
         self._uplink.send(self._preroll[-1])
+        self._silence_run = 0 if speech else self._silence_run + 1
         if self._silence_run >= self._hangover_frames:
-            self._uplink.activity_end()
-            self._state = TurnState.IDLE
-            self._onset_run = 0
-            self._silence_run = 0
-            self._emit("activity_end", now, {"hangover_ms": self.hangover_ms})
+            self._end_turn(now, {"hangover_ms": self.hangover_ms})
+        elif self.max_turn_s is not None and now - self._turn_started_at >= self.max_turn_s:
+            self._end_turn(
+                now,
+                {
+                    "hangover_ms": self.hangover_ms,
+                    "forced": "max_turn",
+                    "max_turn_s": self.max_turn_s,
+                },
+            )
+            # A fresh detector state, in case the stuck thing was the state.
+            self._vad.reset()
+            self._quiet_needed = True
+
+    def _end_turn(self, now: float, detail: dict[str, Any]) -> None:
+        self._uplink.activity_end()
+        self._state = TurnState.IDLE
+        self._onset_run = 0
+        self._silence_run = 0
+        self._forget_candidate()
+        self._emit("activity_end", now, detail)
 
     def _commit(self, now: float, *, barge_in: bool) -> None:
         dropped = 0
@@ -383,7 +500,10 @@ class TurnController:
             dropped = self._mixer.flush()
             self._mixer.ramp_to(1.0, ramp_ms=RESTORE_RAMP_MS)
             self.barge_ins += 1
-        preroll = list(self._preroll)
+        # The newest frames only: an idle commit reaches back past the wait for
+        # K of W, a barge-in no further than it must, since older ring audio
+        # is Jarvis's own voice coming back.
+        preroll = list(self._preroll)[-(self._barge_frames if barge_in else self._idle_frames) :]
         self._preroll.clear()
         self._uplink.activity_start()
         for frame in preroll:
@@ -391,6 +511,8 @@ class TurnController:
         self._state = TurnState.USER_SPEAKING
         self._onset_run = 0
         self._silence_run = 0
+        self._turn_started_at = now
+        self._forget_candidate()
         self._emit(
             "activity_start",
             now,
@@ -424,6 +546,8 @@ class TurnController:
         self._onset_run = 0
         self._silence_run = 0
         self._preroll.clear()
+        self._forget_candidate()
+        self._quiet_needed = False
         self._vad.reset()
         self._emit("turn.aborted", now, {"reason": reason, "was": was.value})
 

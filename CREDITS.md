@@ -14,5 +14,9 @@ good work. Where this project departs from it architecturally, that is a differe
 Also relied on, with thanks:
 
 - **openWakeWord** — the `hey_jarvis` pretrained model.
+- **[Silero VAD](https://github.com/snakers4/silero-vad)** v6.2.3 — the voice activity model that tells
+  a word from a breath. The model file `silero_vad.onnx` is fetched at its pinned SHA-256 and ships inside
+  Jarvis.exe, under the MIT License, Copyright (c) 2020-present Silero Team; the full notice travels with
+  it (`packaging/licenses/silero-vad.txt`). It is never committed to this repository.
 - **Google Gemini Live API** — the conversational voice.
 - **Anthropic Claude Code** and the Claude Agent SDK — the thing this assistant exists to drive.

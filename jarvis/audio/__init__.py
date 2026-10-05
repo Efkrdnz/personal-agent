@@ -74,6 +74,42 @@ HANGOVER_MS = 700
 # it was real, the first ~300 ms of the word is already past.
 PREROLL_MS = 320
 
+# THE IDLE ONSET, for a VAD that can tell a voice from a breath. The three
+# frames in a row above are what let a headset breath (-40 to -24 dBFS, as loud
+# as speech) open a Gemini turn that came back transcribed as "huh" or "que":
+# once activity_start is sent there is no way to take it back, so the only free
+# place to drop a noise is BEFORE it. Measured on synthetic breaths, clicks and
+# espeak words: Silero AND the energy gate with four speech frames in any five
+# kept 14/14 words and opened 0/13 breaths and clicks; three in four let a
+# nasal puff through. The numpy-only fallback is a weaker detector with less
+# lag, so it measured best one frame quicker.
+IDLE_ONSET = (4, 5)
+IDLE_ONSET_FALLBACK = (3, 4)
+
+# Waiting for four of five costs up to ~330 ms after the word began, so the
+# idle pre-roll has to reach back past that and still carry the start of the
+# word: with 640 ms, every measured word went up with 300 ms or more of the
+# room before it. A barge-in sends less, because
+# older audio in the ring is our own voice coming back, but more than 320:
+# Silero lags a speech onset by one to three frames, and 320 left 24 ms.
+IDLE_PREROLL_MS = 640
+BARGE_PREROLL_MS = 416
+
+# Silero's own streaming defaults: enter at 0.5, stay until it drops under
+# 0.35 (threshold - 0.15). Its probability barely depends on level, which is
+# why it is AND-ed with the energy gate below rather than replacing it: ducked
+# echo is rejected by being QUIET, and a VAD that ignores loudness would start
+# hearing it.
+SILERO_ENTER = 0.5
+SILERO_EXIT = 0.35
+VAD_MIN_DBFS = -45.0
+
+# A turn that has not ended after this long has a detector stuck on (a TV, a
+# fan the fallback mistakes for a voice), and while it lasts Jarvis never
+# answers and the desk never sleeps. Longer than anyone speaks without a
+# 700 ms pause.
+MAX_TURN_S = 60.0
+
 # A barge-in flushes the mixer, but audio already in flight from Gemini keeps
 # arriving for a while. Anything older than this when it reaches the mixer is
 # answering a question the user already interrupted.
@@ -87,6 +123,7 @@ SELF_SPEECH_TAIL_S = 1.0
 MONITOR_DB = -12.0
 
 __all__ = [
+    "BARGE_PREROLL_MS",
     "BLOCK",
     "BLOCK_MS",
     "BUS_RATE",
@@ -95,7 +132,11 @@ __all__ = [
     "DUCK_DB",
     "DUCK_RAMP_MS",
     "HANGOVER_MS",
+    "IDLE_ONSET",
+    "IDLE_ONSET_FALLBACK",
+    "IDLE_PREROLL_MS",
     "LIVE_TTL_S",
+    "MAX_TURN_S",
     "MIC_RATE",
     "MONITOR_DB",
     "ONSET_FRAMES",
@@ -103,6 +144,9 @@ __all__ = [
     "RESTORE_RAMP_MS",
     "SELF_SPEECH_TAIL_S",
     "SELF_SPEECH_WINDOW_S",
+    "SILERO_ENTER",
+    "SILERO_EXIT",
     "VAD_FRAME",
     "VAD_FRAME_MS",
+    "VAD_MIN_DBFS",
 ]

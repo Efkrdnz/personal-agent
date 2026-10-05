@@ -47,6 +47,9 @@ htmlcov/
 *.onnx
 *.tflite
 models/
+# Where the Windows workflow puts Silero's model before the exe is built. Named
+# on its own so that narrowing the line above can never start committing it.
+packaging/models/
 
 # ─── OS / editor ──────────────────────────────────────────────────────────────
 .DS_Store
