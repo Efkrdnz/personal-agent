@@ -92,7 +92,9 @@ def notes(con: sqlite3.Connection, *, limit: int = NOTES_IN_CONTEXT) -> list[Not
     """The live notes, newest first."""
     rows = con.execute(
         "SELECT id, text, actor, channel, created_at FROM notes WHERE forgotten_at IS NULL "
-        "ORDER BY created_at DESC, id DESC LIMIT ?",
+        # rowid, not created_at: two notes in one millisecond share a stamp,
+        # and "newest first" must not then depend on a random id.
+        "ORDER BY rowid DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [Note(*r) for r in rows]
@@ -110,11 +112,11 @@ def recall(con: sqlite3.Connection, query: str = "", *, limit: int = 5) -> list[
     if not words:
         return every[:limit]
     scored = []
-    for n in every:
+    for age, n in enumerate(every):  # newest first, so a lower age is newer
         overlap = len(words & _words(n.text))
         if overlap:
-            scored.append((overlap, n.created_at, n))
-    scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+            scored.append((-overlap, age, n))
+    scored.sort(key=lambda x: (x[0], x[1]))
     return [n for _, _, n in scored[:limit]]
 
 

@@ -252,9 +252,11 @@ def test_the_daemon_says_what_it_reminded(con: sqlite3.Connection, capsys) -> No
 
 
 def test_remind_me_says_back_the_time_it_resolved(con: sqlite3.Connection) -> None:
+    before = (datetime.now(IST) + timedelta(minutes=20)).strftime("%H:%M")
     said = registry().dispatch("remind_me", {"what": "call mum", "when": "in 20 minutes"}, ctx(con))
-    expected = (datetime.now(IST) + timedelta(minutes=20)).strftime("%H:%M")
-    assert "call mum" in said and expected in said and "scheduler" in said
+    after = (datetime.now(IST) + timedelta(minutes=20)).strftime("%H:%M")
+    # Either side of a minute boundary the call may have straddled.
+    assert "call mum" in said and (before in said or after in said) and "scheduler" in said
     (r,) = memory.pending_reminders(con)
     assert r.channel == "desk"
 
